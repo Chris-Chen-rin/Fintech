@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
 import sys
 from pathlib import Path
 
-from .settings import AGENT_NAMES, SettingsError, code_version, get_secret, load_settings
+from .settings import AGENT_NAMES, LLMSettings, SettingsError, code_version, get_secret, load_settings
 from .trading_calendar import TradingCalendar, now_tpe, to_tpe
 
 
@@ -63,6 +64,9 @@ def run(args: argparse.Namespace) -> int:
         return 1
     for w in settings.warnings:
         print(f"⚠ {w}")
+    if args.rules_only:
+        settings = dataclasses.replace(settings, llm=LLMSettings())
+        print("⚠ --rules-only：本次全部使用規則版 Agent（不呼叫 LLM）")
     opts = RunOptions(
         datapack_path=args.datapack,
         mock_first_day=args.mock_first_day,
@@ -92,6 +96,21 @@ def run(args: argparse.Namespace) -> int:
     return 1
 
 
+def rehearse_cmd(args: argparse.Namespace) -> int:
+    from .rehearse import format_rows, rehearsal_dir, rehearse
+
+    try:
+        settings = load_settings(args.settings)
+    except SettingsError as exc:
+        print(f"✗ {exc}")
+        return 1
+    start, end = dt.date.fromisoformat(args.start), dt.date.fromisoformat(args.end)
+    rows = rehearse(settings, start, end, args.offline)
+    print("\n" + format_rows(rows))
+    print(f"\n明細：{rehearsal_dir(settings, start, end)}")
+    return 0 if all(r.get("ok") for r in rows) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -107,7 +126,13 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--now", help="以指定時間當作現在（台北時間），演練用")
     p_run.add_argument("--offline", action="store_true", help="只用快取的行情，不連網")
     p_run.add_argument("--no-out", action="store_true", help="通過檢查也不複製到 out/（演練用）")
+    p_run.add_argument("--rules-only", action="store_true", help="不呼叫 LLM，全部用規則版 Agent（LLM 故障或額度用完時的降級）")
     p_run.set_defaults(func=run)
+    p_reh = sub.add_parser("rehearse", help="用過去的真實行情連續演練多天（不輸出到 out/）")
+    p_reh.add_argument("--start", required=True, help="第一個交易日 YYYY-MM-DD（當天建倉）")
+    p_reh.add_argument("--end", required=True, help="最後一個交易日 YYYY-MM-DD")
+    p_reh.add_argument("--offline", action="store_true", help="只用快取，不連網")
+    p_reh.set_defaults(func=rehearse_cmd)
     args = parser.parse_args(argv)
     return args.func(args)
 

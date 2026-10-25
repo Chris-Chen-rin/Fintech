@@ -29,6 +29,8 @@ risk:                        # 內部風控值，比比賽規則更保守
   cash_target_range: [0.03, 0.15]   # 規則 0–25%
   first_day_cash_target: 0.06       # 首日建倉後的目標現金比
   no_trade_band: 0.015       # 權重偏離小於此值就不調整
+  min_weights:               # 個股最低持有比例（0 = 不強制，完全由分數決定；> 0 時一定持有且權重不低於此值）
+    "2330": 0.0
 
 llm:
   # 每個 Agent 可以用不同模型；沒列在 agents 的用 default；default 為 null 則全部用規則版。

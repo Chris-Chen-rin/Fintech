@@ -65,9 +65,14 @@ class RiskSettings:
     cash_target_range: tuple[float, float]
     first_day_cash_target: float
     no_trade_band: float
+    min_weights: dict[str, float] = field(default_factory=dict)  # 個股最低持有比例；0 表示完全由分數決定
 
     def weight_cap(self, ticker: str) -> float:
         return self.tsmc_max_weight if ticker == R.TSMC else self.stock_max_weight
+
+    @property
+    def floors(self) -> dict[str, float]:
+        return {t: w for t, w in self.min_weights.items() if w > 0}
 
 
 @dataclass(frozen=True)
@@ -120,6 +125,7 @@ class LLMSettings:
 @dataclass(frozen=True)
 class Paths:
     root: Path
+    cache_root: Path | None = None  # 演練時另設 root，但沿用正式的快取
 
     @property
     def inbox(self) -> Path:
@@ -135,7 +141,7 @@ class Paths:
 
     @property
     def cache(self) -> Path:
-        return self.root / "cache"
+        return self.cache_root or self.root / "cache"
 
     def archive_for(self, trade_date: dt.date) -> Path:
         return self.archive / trade_date.isoformat()
@@ -325,7 +331,16 @@ def _parse_risk(raw: dict[str, Any], errors: list[str]) -> RiskSettings:
         cash_target_range=(_num(cash[0], "risk.cash_target_range[0]", errors), _num(cash[1], "risk.cash_target_range[1]", errors)),
         first_day_cash_target=_num(raw.get("first_day_cash_target", 0.06), "risk.first_day_cash_target", errors),
         no_trade_band=_num(raw.get("no_trade_band", 0.015), "risk.no_trade_band", errors),
+        min_weights={str(t): _num(w, f"risk.min_weights.{t}", errors) for t, w in (raw.get("min_weights") or {}).items()},
     )
+    universe = {s["code"] for s in json.loads(R.DEFAULT_UNIVERSE.read_text(encoding="utf-8"))["stocks"]}
+    for t, w in risk.min_weights.items():
+        if t not in universe:
+            errors.append(f"risk.min_weights 的 {t} 不在 150 檔標的範圍內")
+        elif not 0 <= w <= risk.weight_cap(t):
+            errors.append(f"risk.min_weights.{t} 必須介於 0 與該股權重上限 {risk.weight_cap(t):.0%}")
+    if sum(risk.min_weights.values()) > 1 - risk.cash_target_range[1]:
+        errors.append("risk.min_weights 合計不能超過股票部位（1 − 現金上限）")
     if not R.MIN_HOLDINGS <= risk.min_holdings <= risk.max_holdings <= R.MAX_HOLDINGS:
         errors.append(f"持股檔數須滿足 {R.MIN_HOLDINGS} ≤ min_holdings ≤ max_holdings ≤ {R.MAX_HOLDINGS}")
     if not 0 < risk.tsmc_max_weight <= R.TSMC_WEIGHT_CAP:

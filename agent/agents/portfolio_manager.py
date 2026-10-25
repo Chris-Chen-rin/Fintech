@@ -15,20 +15,23 @@ CONSTRUCTION = "T:pm:construction"
 FUNDING = "T:pm:funding"
 
 
-def waterfill(raw: dict[str, float], total: float, caps: dict[str, float]) -> dict[str, float]:
-    """依 raw 比例分配 total，超過上限的固定在上限，多出的再分給其他檔。"""
+def waterfill(raw: dict[str, float], total: float, caps: dict[str, float],
+              floors: dict[str, float] | None = None) -> dict[str, float]:
+    """依 raw 比例分配 total，超過上限的固定在上限、低於下限的固定在下限，其餘再分給其他檔。"""
+    floors = floors or {}
     out: dict[str, float] = {}
     free, remaining = dict(raw), total
     while free:
         s = sum(free.values())
         trial = {t: remaining * r / s for t, r in free.items()}
         over = [t for t, x in trial.items() if x > caps[t]]
-        if not over:
+        under = [t for t, x in trial.items() if x < floors.get(t, 0.0)]
+        if not over and not under:
             out.update(trial)
             break
-        for t in over:
-            out[t] = caps[t]
-            remaining -= caps[t]
+        for t in over or under:
+            out[t] = caps[t] if over else floors[t]
+            remaining -= out[t]
             free.pop(t)
     return out
 
@@ -96,6 +99,13 @@ class RulePortfolioManagerAgent:
         if len(keep) + len(new) < risk.min_holdings:  # 檔數下限優先於主題比重
             rest = [t for t in ranked if t not in held and t not in new and affordable(t) and theses[t].view != "negative"]
             new += rest[:risk.min_holdings - len(keep) - len(new)]
+        floors = {t: w for t, w in risk.floors.items() if t in prices}
+        forced = [t for t in floors if t not in keep and t not in new]
+        if forced:  # 設了最低持有比例的個股一定納入，擠掉分數最低的新買進
+            new = [t for t in new if t not in floors]
+            new = sorted(new, key=score, reverse=True)[:max(0, n_target - len(keep) - len(forced))] + forced
+        drops = [t for t in drops if t not in floors]
+        keep = list(dict.fromkeys(keep + [t for t in floors if t in held]))
         selected = keep + new
 
         scores = {t: score(t) for t in selected if t in theses}
@@ -111,9 +121,9 @@ class RulePortfolioManagerAgent:
         alpha = 0.7 ** retry  # 既有持股往目標調整的幅度；退回次數越多調整越保守
         plan, goal = None, cash_goal
         for _ in range(40):
-            base = waterfill(raw, equity, caps)
-            weights = {t: w_cur[t] + alpha * (w - w_cur[t]) if t in w_cur and w_cur[t] <= caps[t] else w
-                       for t, w in base.items()}
+            base = waterfill(raw, equity, caps, floors)
+            weights = {t: max(floors.get(t, 0.0), w_cur[t] + alpha * (w - w_cur[t]))
+                       if t in w_cur and w_cur[t] <= caps[t] else w for t, w in base.items()}
             plan = self._build(ctx, mv, theses, weights, selected, drops)
             sim = simulate_orders(book, derive(plan.decisions, book, prices), prices)
             turnover = (sim.buy_amount + sim.sell_amount) / nav
@@ -179,6 +189,8 @@ class RulePortfolioManagerAgent:
                  f"宣告區間 {mv.cash_range[0]:.0%}–{mv.cash_range[1]:.0%}。組合規則：從 {n_candidates} 檔候選{pool}中依優質動能綜合分數挑選 "
                  f"{n_selected} 檔，以分數傾斜 ±{self.TILT:.0%} 的等權重配置，2330 上限 {risk.tsmc_max_weight:.0%}、其他個股 "
                  f"{risk.stock_max_weight:.0%}；權重偏離小於 {risk.no_trade_band:.1%} 的持股不調整，每日最多出清 {self.MAX_SWAPS} 檔以控制周轉成本。")
+        if risk.floors:
+            logic += "最低持有比例：" + "、".join(f"{t} {w:.0%}" for t, w in risk.floors.items()) + "。"
         return Thesis(CONSTRUCTION, [], list(mv.basis), logic[:1000],
                       f"持股 {n_selected} 檔、股票部位約 {1 - mv.cash_target:.0%}", None, "neutral", None, None, "portfolio_manager/rule")
 

@@ -8,6 +8,7 @@ from ..framework.contracts import MarketView
 
 REGIME_TO_STANCE = {"risk_on": "aggressive", "neutral": "neutral", "risk_off": "defensive"}
 REGIME_LABEL = {"risk_on": "偏多（risk_on）", "neutral": "中性（neutral）", "risk_off": "偏空（risk_off）"}
+ENTER, EXIT = 0.8, 0.3  # 進入偏多／偏空要 |分數| ≥ 0.8；離開要回到 |分數| < 0.3（遲滯，避免天天翻轉）
 
 
 def _clip(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
@@ -15,7 +16,7 @@ def _clip(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
 
 
 class RuleMarketAgent:
-    """依加權指數 1／5／20 日變動與 150 檔漲跌家數打分。"""
+    """依加權指數 1／5／20 日變動與 150 檔漲跌家數打分；參考前一交易日的走向判斷（遲滯）。"""
     name = "market"
     variant = "rule"
 
@@ -38,12 +39,20 @@ class RuleMarketAgent:
         if r1 is not None and r1 <= -2.5:
             score -= 1.0
             signals_down.append(f"前一交易日大跌 {r1:+.2f}%")
-        regime = "risk_on" if score >= 0.8 else "risk_off" if score <= -0.8 else "neutral"
+        prev = inputs.get("prev_regime")
+        regime = "risk_on" if score >= ENTER else "risk_off" if score <= -ENTER else "neutral"
+        sticky = ""
+        if prev == "risk_off" and regime == "neutral" and score < -EXIT:
+            regime, sticky = "risk_off", f"前一交易日為偏空，分數未回升到 {-EXIT:+.1f} 以上，維持偏空以免來回進出"
+        elif prev == "risk_on" and regime == "neutral" and score > EXIT:
+            regime, sticky = "risk_on", f"前一交易日為偏多，分數未跌破 {EXIT:+.1f}，維持偏多以免來回進出"
 
         lo, hi = risk.cash_target_range
         target = {"risk_on": lo + 0.02, "neutral": risk.first_day_cash_target, "risk_off": hi - 0.03}[regime]
         target = round(min(max(target, lo + 0.01), hi - 0.01), 4)
-        cash_range = (round(max(lo, target - 0.03), 4), round(min(hi, target + 0.04), 4))
+        # 中性的上緣放寬到與偏空區間重疊：偏空後轉中性時保留現金，不立刻買回（轉偏多才回補）
+        upper = target + (0.06 if regime == "neutral" else 0.04)
+        cash_range = (round(max(lo, target - 0.03), 4), round(min(hi, upper), 4))
 
         current = inputs["cash_ratio"]
         if current > cash_range[1]:
@@ -71,6 +80,8 @@ class RuleMarketAgent:
         logic = (f"依據 {refs}：綜合分數 {score:+.2f}（20 日、5 日指數變動與上漲家數加權），"
                  f"研判市場{REGIME_LABEL[regime]}。目前現金比 {current:.1%}，目標現金比 {target:.0%}、"
                  f"區間 {cash_range[0]:.0%}–{cash_range[1]:.0%}，因此今日{intent_text}。")
+        if sticky:
+            logic += sticky + "。"
         if inputs.get("first_day"):
             logic += "今天是首個交易日，帳戶為全現金，需一次建立 20 檔以上的持股。"
         logic += revision

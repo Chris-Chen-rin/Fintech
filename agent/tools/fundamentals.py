@@ -3,7 +3,7 @@
 - 綜合損益表彙總（累計至該季）：mopsov.twse.com.tw/mops/web/ajax_t163sb04
 - 現金流量表彙總（累計至該季）：mopsov.twse.com.tw/mops/web/ajax_t163sb20
 - 月營收：mopsov.twse.com.tw/nas/t21/{sii|otc}/t21sc03_{民國年}_{月}_{0 本國|1 外國}.html
-- 本益比、殖利率、股價淨值比：證交所 BWIBBU_ALL、櫃買中心 tpex_mainboard_peratio_analysis
+- 本益比、殖利率、股價淨值比（按日期）：證交所 BWIBBU_d、櫃買中心 peQryDate
 - 公司基本資料（實收資本額、面額 → 發行股數）：t187ap03_L、mopsfin_t187ap03_O
 
 金額單位：財報彙總為千元，事實文字換算成億元。
@@ -31,9 +31,11 @@ REVENUE_URL = "https://mopsov.twse.com.tw/nas/t21/{typek}/t21sc03_{year}_{month}
 PAGES = {"income": "t163sb04", "cashflow": "t163sb20"}
 TYPEK = {"twse": "sii", "tpex": "otc"}
 MARKET_LABEL = {"twse": "上市", "tpex": "上櫃"}
+VALUATION_URL = {
+    "twse": "https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d?date={ymd}&selectType=ALL&response=json",
+    "tpex": "https://www.tpex.org.tw/www/zh-tw/afterTrading/peQryDate?date={y}%2F{m}%2F{d}&response=json",
+}
 OPENAPI = {
-    ("valuation", "twse"): "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL",
-    ("valuation", "tpex"): "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis",
     ("profile", "twse"): "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
     ("profile", "tpex"): "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O",
 }
@@ -369,7 +371,7 @@ class FundamentalsLoader:
 
     def revenue_page(self, market: str, year: int, month: int, foreign: bool) -> Table | None:
         """公開資訊觀測站月營收彙總（本國／外國企業各一頁）；次月 10 日前公告，過了 12 日視為定案。"""
-        published = dt.date(year + 1911 + (month == 12), month % 12 + 1, 12)
+        published = dt.date(year + 1911 + (month == 12), month % 12 + 1, 12)  # 12 日後視為定案
         tag = "" if self.as_of > published else self.as_of.isoformat()
         url = REVENUE_URL.format(typek=TYPEK[market], year=year, month=month, foreign=int(foreign))
         try:
@@ -395,10 +397,12 @@ class FundamentalsLoader:
         return Table(record.key, record, rows)
 
     def _load_revenue(self, market: str, codes: set[str], out: dict[str, Fundamentals]) -> None:
-        first = self.as_of.replace(day=1) - dt.timedelta(days=1)  # 上個月
-        months = [(first.year - 1911, first.month)]
-        prev = first.replace(day=1) - dt.timedelta(days=1)
-        months.append((prev.year - 1911, prev.month))
+        # 法定期限（次月 10 日）過後才用該月：避免公告期間只有部分公司的半成品，演練時也不會前視
+        last = self.as_of.replace(day=1) - dt.timedelta(days=1)
+        if self.as_of.day <= 10:
+            last = last.replace(day=1) - dt.timedelta(days=1)
+        prev = last.replace(day=1) - dt.timedelta(days=1)
+        months = [(last.year - 1911, last.month), (prev.year - 1911, prev.month)]
         for foreign in (False, True):
             todo = {c for c in codes if out[c].rev_month is None}
             for year, month in months:
@@ -415,38 +419,41 @@ class FundamentalsLoader:
                     todo.discard(c)
 
     def _load_valuation(self, market: str, codes: set[str], out: dict[str, Fundamentals]) -> None:
-        got = self._openapi("valuation", market)
-        if not got:
+        """指定日期（資料截止日）的本益比、殖利率、股價淨值比；按日期查詢，不會用到未來資料。"""
+        day = self.as_of
+        url = VALUATION_URL[market].format(ymd=f"{day:%Y%m%d}", y=day.year, m=f"{day:%m}", d=f"{day:%d}")
+        try:
+            fetched = self.client.get_json(url)
+        except FetchError as exc:
+            self.notes.append(f"{MARKET_LABEL[market]}本益比抓取失敗：{exc}")
             return
-        rows, fetched = got
-        keys = (("Code", "PEratio", "PBratio", "DividendYield") if market == "twse" else
-                ("SecuritiesCompanyCode", "PriceEarningRatio", "PriceBookRatio", "YieldRatio"))
-        records: dict[str, SourceRecord] = {}
+        data = fetched.data if isinstance(fetched.data, dict) else {}
+        table = (data.get("tables") or [{}])[0] if market == "tpex" else data
+        fields, rows = table.get("fields") or [], table.get("data") or []
+        idx = {k: next((i for i, f in enumerate(fields) if f.startswith(k)), None)
+               for k in ("證券代號" if market == "twse" else "股票代號", "本益比", "股價淨值比", "殖利率")}
+        if not rows or None in idx.values():
+            self.client.forget(url)  # 尚未公布：下次重抓
+            self.notes.append(f"{MARKET_LABEL[market]} {day} 的本益比資料尚未公布")
+            return
+        code_i, pe_i, pb_i, dy_i = idx.values()
+        label = "證交所上市個股本益比、殖利率及股價淨值比" if market == "twse" else "櫃買中心上櫃個股本益比、殖利率及股價淨值比"
+        record = SourceRecord(
+            key=f"{market}:valuation:{day.isoformat()}", authority=market, url=url,
+            content_as_of=iso_tpe(dt.datetime.combine(day, CLOSE_TIME, TPE)), name=f"{label} {day.isoformat()}",
+            fetched_at=fetched.fetched_at, snapshot=str(fetched.snapshot),
+        )
         for r in rows:
-            c = r.get(keys[0])
+            c = str(r[code_i]).strip()
             if c not in codes:
                 continue
-            raw_date = str(r.get("Date") or "")
-            try:
-                day = dt.date(int(raw_date[:-4]) + 1911, int(raw_date[-4:-2]), int(raw_date[-2:]))
-            except ValueError:
-                continue
-            if raw_date not in records:
-                label = "證交所上市個股本益比、殖利率及股價淨值比" if market == "twse" else "櫃買中心上櫃個股本益比、殖利率及股價淨值比"
-                records[raw_date] = SourceRecord(
-                    key=f"{market}:valuation:{day.isoformat()}", authority=market, url=fetched.url,
-                    content_as_of=iso_tpe(dt.datetime.combine(day, CLOSE_TIME, TPE)), name=f"{label} {day.isoformat()}",
-                    fetched_at=fetched.fetched_at, snapshot=str(fetched.snapshot),
-                )
             f = out[c]
-            pe = num(r.get(keys[1]))
+            pe = num(r[pe_i])
             f.pe = pe if pe and pe > 0 else None
-            f.pb = num(r.get(keys[2])) or None
-            f.dividend_yield = num(r.get(keys[3]))
+            f.pb = num(r[pb_i]) or None
+            f.dividend_yield = num(r[dy_i])
             f.valuation_date = day
-            f.records["valuation"] = records[raw_date]
-        if records and max(records) != f"{self.as_of.year - 1911}{self.as_of:%m%d}":
-            self.notes.append(f"{MARKET_LABEL[market]}本益比資料日期為 {max(records)}，不是 {self.as_of}")
+            f.records["valuation"] = record
 
     def _load_profile(self, market: str, codes: set[str], out: dict[str, Fundamentals]) -> None:
         got = self._openapi("profile", market)

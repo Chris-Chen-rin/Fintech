@@ -263,3 +263,58 @@ def test_parse_twse_signs():
     assert indices["TAIEX"]["chg_pct"] == -1.81 and indices["TAIEX"]["chg_points"] == -846.34
     assert quotes["2330"].close == 2385 and quotes["2330"].change == -15
     assert parse_twse(data, dt.date(2026, 10, 23), {"2330"}) is None
+
+
+def test_market_regime_hysteresis(tmp_path):
+    from agent.agents.market import RuleMarketAgent
+    from agent.tools.quant import build_market_facts, build_stock_metrics
+
+    ctx, _ = build_ctx(tmp_path, first_day_datapack("TEAM_123", TRADE_DATE, "x"))
+    ctx.metrics = build_stock_metrics(ctx)
+    build_market_facts(ctx)
+    mild = {"taiex_chg_pct": -0.5, "taiex_ret_5d": -1.0, "taiex_ret_20d": -1.0, "breadth": 0.45}  # 分數約 -0.48
+    base = {"market_facts": ctx.facts.of("market"), "market_metrics": mild, "cash_ratio": 0.12, "first_day": False}
+    assert RuleMarketAgent().run(ctx, base).regime == "neutral"
+    mv = RuleMarketAgent().run(ctx, base | {"prev_regime": "risk_off"})
+    assert mv.regime == "risk_off" and mv.intent == "hold" and "維持偏空" in mv.logic
+    # 中性的現金區間上緣放寬：偏空後轉中性時 12% 現金不必立刻買回
+    flat = base | {"market_metrics": {"taiex_chg_pct": 0.1, "taiex_ret_5d": 0.0, "taiex_ret_20d": 0.0, "breadth": 0.5}}
+    mv = RuleMarketAgent().run(ctx, flat | {"prev_regime": "risk_off"})
+    assert mv.regime == "neutral" and mv.intent == "hold" and mv.cash_range[1] >= 0.12
+
+
+def test_rehearsal_fill_orders():
+    from agent.rehearse import Book, fill_orders
+
+    book = Book(cash=1_000_000.0, shares={"2330": 1000})
+    prices = {"2330": 500.0, "2317": 100.0}
+    outcome, cost = fill_orders(book, [{"ticker": "2330", "side": "SELL", "shares": 1000},
+                                       {"ticker": "2317", "side": "BUY", "shares": 5000}], prices)
+    assert outcome == "executed" and "2330" not in book.shares and book.shares["2317"] == 5000
+    assert round(book.cash) == round(1_000_000 + 500_000 * (1 - R.FEE_RATE - R.TAX_RATE) - 500_000 * (1 + R.FEE_RATE))
+    before = (book.cash, dict(book.shares))
+    assert fill_orders(book, [{"ticker": "2317", "side": "BUY", "shares": 1_000_000}], prices)[0] == "void"
+    assert (book.cash, book.shares) == before
+
+
+def test_min_weight_floor(tmp_path):
+    ctx, dp_path = build_ctx(tmp_path, first_day_datapack("TEAM_123", TRADE_DATE, "2026-10-26T19:40:00+08:00"),
+                             min_weights={"2330": 0.15})
+    result = execute(ctx, dp_path, CAL, write_out=False)
+    assert result.ok, errors(result)
+    doc = json.loads(result.dplan_path.read_text(encoding="utf-8"))
+    dec = next(d for d in doc["decisions"] if d["ticker"] == "2330")
+    assert dec["action"] == "BUY" and dec["target_weight"] >= 0.145
+
+
+@pytest.mark.parametrize("floors", [{"2330": 0.30}, {"9999": 0.01}, {"2317": -0.01}])
+def test_min_weight_invalid(tmp_path, floors):
+    with pytest.raises(Exception, match="min_weights"):
+        make_settings(tmp_path, min_weights=floors)
+
+
+def test_waterfill_floor():
+    from agent.agents.portfolio_manager import waterfill
+
+    w = waterfill({"a": 1, "b": 1, "c": 1}, 0.9, {"a": 0.5, "b": 0.5, "c": 0.5}, {"a": 0.5})
+    assert w["a"] == 0.5 and abs(w["b"] - 0.2) < 1e-9 and abs(sum(w.values()) - 0.9) < 1e-9

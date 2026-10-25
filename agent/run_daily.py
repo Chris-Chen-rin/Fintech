@@ -60,6 +60,7 @@ class RunOptions:
     offline: bool = False
     history_days: int = 61  # 60 個交易日報酬（約 3 個月相對強度）
     write_out: bool = True
+    ignore_errors: frozenset[str] = frozenset()  # 只供演練：例如初賽期間外的 trade_date
 
 
 @dataclass
@@ -85,6 +86,23 @@ def _load_datapack(settings: Settings, opts: RunOptions, trade_date: dt.date, mo
     path = opts.datapack_path or find_datapack(settings.paths.inbox, trade_date)
     dp = load_datapack(path, settings.team_id)
     return dp, dp.raw
+
+
+def previous_market_view(settings: Settings, prev_trade_date: dt.date) -> dict[str, Any] | None:
+    """前一交易日實際送出的 D-Plan（out/ 優先，否則該日最後一次通過檢查的存檔）的 market_view。"""
+    name = filename(settings.team_id, prev_trade_date.isoformat())
+    candidates = [settings.paths.out / name]
+    day_dir = settings.paths.archive_for(prev_trade_date)
+    if day_dir.exists():
+        runs = sorted((p for p in day_dir.iterdir() if p.is_dir()), reverse=True)
+        candidates += [p / name for p in runs if (p / "PASSED").exists()]
+    for path in candidates:
+        if path.exists():
+            try:
+                return json.loads(path.read_text(encoding="utf-8")).get("market_view")
+            except (OSError, json.JSONDecodeError):
+                continue
+    return None
 
 
 def run_daily(settings: Settings, opts: RunOptions | None = None) -> RunResult:
@@ -138,10 +156,11 @@ def run_daily(settings: Settings, opts: RunOptions | None = None) -> RunResult:
     ctx.log(f"▶ 行情 {len(history.dates)} 個交易日（{history.dates[0]} ～ {history.last}），本次連線 {client.request_count} 次")
     with_fs = sum(1 for f in fundamentals.values() if f.season)
     ctx.log(f"▶ 財報：{with_fs}/{len(universe)} 檔有最近一季財報" + "".join(f"；⚠ {n}" for n in fund_notes))
-    return execute(ctx, dp_path, cal, opts.write_out)
+    return execute(ctx, dp_path, cal, opts.write_out, opts.ignore_errors)
 
 
-def execute(ctx: RunContext, dp_path: Path, cal: TradingCalendar, write_out: bool = True) -> RunResult:
+def execute(ctx: RunContext, dp_path: Path, cal: TradingCalendar, write_out: bool = True,
+            ignore_errors: frozenset[str] = frozenset()) -> RunResult:
     """資料備齊後的流程：量化事實 → 五個 Agent → 風控閘門 → 組裝 → 檢查器 → 輸出。"""
     settings, datapack, window, run_dir, moment = ctx.settings, ctx.datapack, ctx.window, ctx.run_dir, ctx.started_at
     universe = ctx.universe
@@ -164,8 +183,10 @@ def execute(ctx: RunContext, dp_path: Path, cal: TradingCalendar, write_out: boo
                              lambda n, o: validate_facts(n, o, source_keys))
     ctx.facts.extend(intel_facts)
 
+    prev_mv = None if datapack.is_first_day else previous_market_view(settings, window.prev_trading_date)
     market_inputs = {"market_facts": ctx.facts.of("market"), "market_metrics": ctx.market_metrics,
-                     "cash_ratio": datapack.cash_ratio, "first_day": datapack.is_first_day}
+                     "cash_ratio": datapack.cash_ratio, "first_day": datapack.is_first_day,
+                     "prev_regime": (prev_mv or {}).get("regime")}
     mv = runner.run("market", agents["market"], market_inputs, lambda n, o: validate_market_view(n, o, ctx.facts.keys()))
     ctx.log(f"▶ 市場策略：{mv.regime}／{mv.stance}／{mv.intent}，現金區間 {mv.cash_range[0]:.0%}–{mv.cash_range[1]:.0%}")
 
@@ -212,7 +233,7 @@ def execute(ctx: RunContext, dp_path: Path, cal: TradingCalendar, write_out: boo
         dplan_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
         report = _check(ctx, dplan_path, dp_path)
         result.report, result.dplan_path = report, dplan_path
-        if report.ok:
+        if not [i for i in report.errors if i.code not in ignore_errors]:
             break
         pm_errors = [f"{i.code}：{i.message}" for i in report.errors if i.code.startswith(PM_CHECK_CODES)]
         if attempt == CHECKER_RETRIES or not pm_errors:
@@ -224,7 +245,9 @@ def execute(ctx: RunContext, dp_path: Path, cal: TradingCalendar, write_out: boo
     ctx.save("gate.json", {"violations": [str(v) for v in gate.violations], "summary": gate.summary})
     (run_dir / "check_report.txt").write_text(result.report.format_text(), encoding="utf-8")
     ctx.save("check_report.json", result.report.to_dict())
-    result.ok = result.report.ok
+    result.ok = not [i for i in result.report.errors if i.code not in ignore_errors]
+    if result.ok:
+        (run_dir / "PASSED").write_text(result.dplan_path.name, encoding="utf-8")
     if result.ok and write_out:
         out = settings.paths.out / result.dplan_path.name
         out.parent.mkdir(parents=True, exist_ok=True)
