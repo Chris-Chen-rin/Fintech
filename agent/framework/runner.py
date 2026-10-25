@@ -28,11 +28,14 @@ class AgentRunner:
 
     def run(self, step: str, agents: list[Agent], inputs: dict[str, Any],
             validate: Callable[[str, Any], None], feedback: list[str] | None = None,
-            attempts: int = 1) -> Any:
-        """依序嘗試 agents（通常是 [LLM 版, 規則版]），每個最多 attempts 次；失敗原因會當作 feedback 傳給下一次。"""
+            attempts: int = 2) -> Any:
+        """依序嘗試 agents（通常是 [LLM 版, 規則版]）。LLM 版最多 attempts 次，失敗原因當作 feedback 傳給下一次；
+        規則版只跑一次，且只看原始 feedback（LLM 的失敗訊息與它無關）。"""
         notes = list(feedback or [])
         for agent in agents:
-            for attempt in range(1, attempts + 1):
+            if agent.variant != "llm":
+                notes = list(feedback or [])
+            for attempt in range(1, (attempts if agent.variant == "llm" else 1) + 1):
                 self.seq += 1
                 started = time.monotonic()
                 output: Any = None
@@ -47,6 +50,8 @@ class AgentRunner:
                     problems = getattr(exc, "problems", None) or [str(exc)]
                     notes = notes + [f"[{agent.name}/{agent.variant} 第 {attempt} 次] " + p for p in problems]
                     self.ctx.log(f"  ✗ {step}：{agent.name}（{agent.variant}）失敗：{exc}")
+                    if getattr(exc, "final", False):
+                        break
                     continue
                 finally:
                     record["seconds"] = round(time.monotonic() - started, 3)

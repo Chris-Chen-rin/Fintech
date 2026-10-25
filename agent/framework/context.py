@@ -67,9 +67,11 @@ class RunContext:
     metrics: dict[str, Any] = field(default_factory=dict)
     theme: Any = None  # ThemeMembership
     fundamentals: dict[str, Any] = field(default_factory=dict)  # 代號 → Fundamentals
+    announcements: list[Any] = field(default_factory=list)  # 重大訊息（新的在前）
     market_metrics: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, int] = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0, "tool_use_count": 0})
     log_lines: list[str] = field(default_factory=list)
+    llm_calls: int = 0  # 本次執行已呼叫 LLM 的次數（含失敗）
 
     @property
     def book(self):

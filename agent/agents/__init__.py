@@ -5,7 +5,8 @@ LLM 版在里程碑 C 實作後登記到 LLM_AGENTS；尚未登記或沒設定�
 from __future__ import annotations
 
 from ..settings import Settings
-from .intel import RuleIntelAgent
+from .intel import LLMIntelAgent, RuleIntelAgent
+from .llm_agents import LLMMarketAgent, LLMPortfolioManagerAgent, LLMResearchAgent, LLMReviewerAgent
 from .market import RuleMarketAgent
 from .portfolio_manager import RulePortfolioManagerAgent
 from .research import RuleResearchAgent
@@ -19,7 +20,13 @@ RULE_AGENTS = {
     "reviewer": RuleReviewerAgent,
     "portfolio_manager": RulePortfolioManagerAgent,
 }
-LLM_AGENTS: dict[str, type] = {}  # 步驟名稱 → LLMAgent 子類別
+LLM_AGENTS: dict[str, type] = {
+    "intel": LLMIntelAgent,
+    "market": LLMMarketAgent,
+    "research": LLMResearchAgent,
+    "reviewer": LLMReviewerAgent,
+    "portfolio_manager": LLMPortfolioManagerAgent,
+}
 
 
 def build_agents(settings: Settings) -> dict[str, list]:

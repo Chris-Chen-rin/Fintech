@@ -243,8 +243,11 @@ def test_runner_falls_back_to_rule_agent(tmp_path):
     ctx, _ = build_ctx(tmp_path, first_day_datapack("TEAM_123", TRADE_DATE, "x"))
     runner = AgentRunner(ctx)
     out = runner.run("pm", [_Boom(), _Echo()], {}, lambda n, o: None)
-    assert runner.used["pm"] == "rule" and "LLM 逾時" in out["feedback"][0]
-    assert len(list((ctx.run_dir / "agents").iterdir())) == 2
+    # LLM 版重試一次後降級；規則版只看原始 feedback
+    assert runner.used["pm"] == "rule" and out["feedback"] is None
+    assert len(list((ctx.run_dir / "agents").iterdir())) == 3
+    out = runner.run("pm3", [_Boom(), _Echo()], {}, lambda n, o: None, feedback=["風控退回"])
+    assert out["feedback"] == ["風控退回"]
     with pytest.raises(AgentFailure):
         runner.run("pm2", [_Boom()], {}, lambda n, o: None)
 

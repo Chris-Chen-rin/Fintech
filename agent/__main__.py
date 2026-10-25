@@ -38,6 +38,11 @@ def doctor(args: argparse.Namespace) -> int:
         print(f"    {name:<18}" + " → ".join([s.label for s in chain] + ["規則版"]) + ready)
     for key in sorted(keys):
         print(f"  金鑰 {key}：{'已找到' if get_secret(key) is not None else '找不到'}")
+    if settings.llm.enabled:
+        from .llm.budget import daily_count
+        used = daily_count(settings.paths.cache)
+        print(f"  LLM 額度：今日（UTC）已用 {used}/{settings.llm.daily_call_limit} 次，"
+              f"每次執行最多 {settings.llm.max_calls_per_run} 次（台北時間 08:00 重置）")
     print(f"  資料根目錄：{settings.paths.root}")
     print(f"  程式版本：{code_version()}")
     print(f"  現在（台北）：{moment:%Y-%m-%d %H:%M:%S}")

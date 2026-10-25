@@ -30,6 +30,7 @@ from .risk_gate import GateResult, check_plan, overweight_streaks
 from .settings import Settings, code_version
 from .sources import SourceRegistry
 from .theme import resolve_theme
+from .tools.announcements import AnnouncementLoader
 from .tools.fundamentals import FundamentalsLoader
 from .tools.http import HttpClient
 from .tools.market_data import PriceStore, load_history
@@ -150,12 +151,26 @@ def run_daily(settings: Settings, opts: RunOptions | None = None) -> RunResult:
     except Exception as exc:  # noqa: BLE001 - 財報是加分資料，失敗時照常以價量交件
         fund_notes = [f"財報資料載入失敗，本次只用價量：{exc}"]
 
+    print("▶ 抓取重大訊息：公開資訊觀測站每日重大訊息（最近 5 天）")
+    announcements: list[Any] = []
+    news_records: list[Any] = []
+    try:
+        news = AnnouncementLoader(client, set(universe), moment)
+        announcements, news_records = news.load(), list(news.records.values())
+        fund_notes += news.notes
+    except Exception as exc:  # noqa: BLE001 - 重大訊息是加分資料，失敗時照常交件
+        fund_notes.append(f"重大訊息載入失敗：{exc}")
+
     ctx = RunContext(settings=settings, window=window, datapack=datapack, universe=universe, markets=markets,
                      history=history, prices=prices, registry=SourceRegistry(), facts=FactBook(), run_dir=run_dir,
-                     started_at=moment, clock_offset=moment - real_now, fundamentals=fundamentals)
+                     started_at=moment, clock_offset=moment - real_now, fundamentals=fundamentals,
+                     announcements=announcements)
+    for rec in news_records:
+        ctx.registry.add(rec)
     ctx.log(f"▶ 行情 {len(history.dates)} 個交易日（{history.dates[0]} ～ {history.last}），本次連線 {client.request_count} 次")
     with_fs = sum(1 for f in fundamentals.values() if f.season)
-    ctx.log(f"▶ 財報：{with_fs}/{len(universe)} 檔有最近一季財報" + "".join(f"；⚠ {n}" for n in fund_notes))
+    ctx.log(f"▶ 財報：{with_fs}/{len(universe)} 檔有最近一季財報；重大訊息 {len(announcements)} 則"
+            + "".join(f"；⚠ {n}" for n in fund_notes))
     return execute(ctx, dp_path, cal, opts.write_out, opts.ignore_errors)
 
 
@@ -201,6 +216,7 @@ def execute(ctx: RunContext, dp_path: Path, cal: TradingCalendar, write_out: boo
     weak = [r for r in reviews if r.verdict == "weak"]
     if weak:
         research_inputs["weak"] = [t.tickers[0] for t in theses if t.key in {r.key for r in weak} and t.tickers]
+        research_inputs["previous"] = theses
         theses = runner.run("research_retry", agents["research"], research_inputs, check_theses,
                             feedback=[f"{r.key}：{r.note}" for r in weak])
         notes = {r.key: r.note for r in weak}

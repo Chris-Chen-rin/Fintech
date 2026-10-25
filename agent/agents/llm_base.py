@@ -32,7 +32,16 @@ class LLMAgent:
         system, user = self.build_prompt(ctx, inputs, feedback)
         if feedback:
             user += "\n\n上一次的輸出未通過檢查，請修正：\n" + "\n".join(f"- {f}" for f in feedback[-8:])
-        result = self.client.complete_json(system, user)
+        from ..llm.budget import reserve
+
+        reserve(ctx)
+        try:
+            result = self.client.complete_json(system, user)
+        except Exception as exc:
+            if getattr(exc, "raw", None):
+                ctx.save(f"llm/{self.name}_failed_{ctx.usage['tool_use_count'] + 1:02d}.json",
+                         {"model": self.spec.label, "error": str(exc), "system": system, "user": user, "response": exc.raw})
+            raise
         ctx.usage["input_tokens"] += result.input_tokens
         ctx.usage["output_tokens"] += result.output_tokens
         ctx.usage["tool_use_count"] += 1

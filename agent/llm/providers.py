@@ -52,7 +52,12 @@ class OpenAICompatibleClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"回應格式不符：{str(data)[:300]}") from exc
         usage = data.get("usage") or {}
-        return LLMResult(parse_json_text(text), text, int(usage.get("prompt_tokens") or 0),
+        try:
+            parsed = parse_json_text(text)
+        except LLMError as exc:
+            exc.raw = text or str(data)[:2000]
+            raise
+        return LLMResult(parsed, text, int(usage.get("prompt_tokens") or 0),
                          int(usage.get("completion_tokens") or 0), str(data.get("model") or self.spec.model),
                          time.monotonic() - started)
 

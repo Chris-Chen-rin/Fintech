@@ -99,6 +99,12 @@ class RulePortfolioManagerAgent:
         if len(keep) + len(new) < risk.min_holdings:  # 檔數下限優先於主題比重
             rest = [t for t in ranked if t not in held and t not in new and affordable(t) and theses[t].view != "negative"]
             new += rest[:risk.min_holdings - len(keep) - len(new)]
+        choice = inputs.get("choice")  # LLM 版投資組合經理的選股；有的話取代上面的規則選股
+        self._choice = choice
+        if choice:
+            drops = [t for t in choice["sell"] if t in held]
+            keep = [t for t in held if t not in drops]
+            new = [t for t in choice["buy"] if t not in held and t in prices]
         floors = {t: w for t, w in risk.floors.items() if t in prices}
         forced = [t for t in floors if t not in keep and t not in new]
         if forced:  # 設了最低持有比例的個股一定納入，擠掉分數最低的新買進
@@ -112,6 +118,9 @@ class RulePortfolioManagerAgent:
         mu = statistics.fmean(scores.values()) if scores else 0.0
         sd = (statistics.pstdev(scores.values()) if len(scores) > 1 else 0.0) or 1.0
         raw = {t: 1 + self.TILT * max(-1.5, min(1.5, (scores.get(t, mu) - mu) / sd)) for t in selected if t in prices}
+        if choice:
+            for t in raw:
+                raw[t] *= 1.3 if t in choice["overweight"] else 0.7 if t in choice["underweight"] else 1.0
         caps = {t: risk.weight_cap(t) - margin for t in raw}
 
         w_cur = {t: book.shares(t) * prices[t] / nav for t in held if t in prices}
@@ -191,8 +200,15 @@ class RulePortfolioManagerAgent:
                  f"{risk.stock_max_weight:.0%}；權重偏離小於 {risk.no_trade_band:.1%} 的持股不調整，每日最多出清 {self.MAX_SWAPS} 檔以控制周轉成本。")
         if risk.floors:
             logic += "最低持有比例：" + "、".join(f"{t} {w:.0%}" for t, w in risk.floors.items()) + "。"
+        author = "portfolio_manager/rule"
+        choice = getattr(self, "_choice", None)
+        if choice:
+            author = "portfolio_manager/llm"
+            logic = (choice["logic"] + f" 權重計算：分數傾斜 ±{self.TILT:.0%} 的等權重，加碼／減碼名單各乘 1.3／0.7，"
+                     f"2330 上限 {risk.tsmc_max_weight:.0%}、其他個股 {risk.stock_max_weight:.0%}，"
+                     f"偏離小於 {risk.no_trade_band:.1%} 不調整。")
         return Thesis(CONSTRUCTION, [], list(mv.basis), logic[:1000],
-                      f"持股 {n_selected} 檔、股票部位約 {1 - mv.cash_target:.0%}", None, "neutral", None, None, "portfolio_manager/rule")
+                      f"持股 {n_selected} 檔、股票部位約 {1 - mv.cash_target:.0%}", None, "neutral", None, None, author)
 
     def _tag_funding(self, ctx: RunContext, mv: MarketView, plan: PortfolioPlan, theses: dict[str, Thesis]) -> None:
         """不賣出就會跌破現金下限時，賣出才是資金調度：標記 funding_for 並寫明讓位理由。"""

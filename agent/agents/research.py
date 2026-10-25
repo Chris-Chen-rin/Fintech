@@ -101,6 +101,10 @@ class RuleResearchAgent:
                 miss = ctx.theme.misses.get(c)
                 logic += (f"；不在「{theme_name}」核心選股池" + (f"（{miss}）" if miss else "")
                           + "，僅能作為分散用的衛星持股，檔數受核心池比重限制")
+            news = [f.key for f in ctx.facts.of(c) if f.topic == "intel"][:2]
+            if news:
+                premises += news
+                logic += "；近期重大訊息（" + "、".join(f"{{{k}}}" for k in news) + "）列入追蹤，未納入分數"
 
             trend = m.ret_60d if m.ret_60d is not None else m.ret_20d
             if c in weak or (f is not None and f.profitable_ttm is False and s > -0.5):

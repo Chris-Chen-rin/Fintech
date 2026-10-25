@@ -37,6 +37,8 @@ llm:
   # provider：openai / anthropic / google / xai / deepseek / openai_compatible（自架或其他相容服務，需 base_url）/ mock
   # 每個 Agent 最後一定有規則版備援；fallback 可再多指定一個備援模型。
   # 多家供應商混用時，D-Plan 的 model_provider 會填 other，model_version 列出各 Agent 的模型（完整對照存在 archive 的 models.json）。
+  max_calls_per_run: 20   # 一次執行最多呼叫 LLM 幾次（含失敗重試），超過就改用規則版
+  daily_call_limit: 45    # 每日（UTC）上限；OpenRouter 免費模型每天 50 次，計數存在 cache/llm_calls.json
   default: null
   #   provider: google
   #   model: gemini-2.5-flash

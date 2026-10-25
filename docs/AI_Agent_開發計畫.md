@@ -228,6 +228,10 @@ Fintech/
 .venv\Scripts\python.exe -m agent run --rules-only
 ```
 
+LLM 額度：OpenRouter 免費模型每天 50 次（UTC 00:00＝台北 08:00 重置）。一次完整執行約 12～17 次，費時約 20 分鐘。
+`llm.max_calls_per_run`（預設 20）與 `llm.daily_call_limit`（預設 45）超過時 LLM 版直接改用規則版，計數存在 `cache/llm_calls.json`，`doctor` 會顯示今日已用次數。
+**正式交件當天不要先試跑**，把額度留給正式執行。模型回傳的 JSON 有小錯（未跳脫的引號、多餘逗號、輸出被截斷）時會先自動修復再解析。
+
 ### 7.1 10/26 晚上首日驗收步驟
 
 1. 19:30 前：`git pull`、`python -m agent doctor`（確認交易日 10/27、繳交時段、各 Agent 模型與金鑰）、`python -m pytest -q` 全過。

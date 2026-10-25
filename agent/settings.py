@@ -108,6 +108,8 @@ class LLMSettings:
     default: ModelSpec | None = None
     agents: dict[str, ModelSpec] = field(default_factory=dict)
     fallback: dict[str, ModelSpec] = field(default_factory=dict)
+    max_calls_per_run: int = 20  # 一次完整執行約 6～17 次；超過就降級為規則版
+    daily_call_limit: int = 45  # OpenRouter 免費模型每天 50 次，留 5 次緩衝
 
     def for_agent(self, name: str) -> ModelSpec | None:
         spec = self.agents.get(name, self.default)
@@ -312,7 +314,15 @@ def _parse_llm(raw: dict[str, Any], errors: list[str], warnings: list[str]) -> L
             spec = _model_spec(spec_raw, f"llm.{section}.{name}", errors)
             if spec:
                 target[name] = spec
-    llm = LLMSettings(default, agents, fallback)
+    limits = {}
+    for name in ("max_calls_per_run", "daily_call_limit"):
+        if name in raw:
+            value = raw[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                errors.append(f"llm.{name} 必須是非負整數")
+            else:
+                limits[name] = value
+    llm = LLMSettings(default, agents, fallback, **limits)
     if not llm.enabled:
         warnings.append("LLM 尚未設定：五個 Agent 都使用規則版")
     return llm
