@@ -14,12 +14,25 @@ from dplan_checker import rules as R
 from ..framework.context import RunContext
 from ..framework.contracts import FACT_TOKEN, INTENTS, REGIMES, STANCES, VIEWS, MarketView, Review, Thesis
 from ..llm.base import LLMError
+from ..settings import PROJECT_ROOT
 from .llm_base import LLMAgent
-from .portfolio_manager import RulePortfolioManagerAgent
+from .portfolio_manager import RulePortfolioManagerAgent, anchor_codes
 from .research import RuleResearchAgent
+from .reviewer import conflict_notes
+from ..tools.signals import conflicts
 
 FOCUS = 40  # LLM 研究的檔數：規則分數前段＋現有持股＋有重大訊息的股票
 NO_INFER = "文中提到的數字必須出自輸入的事實，不得捏造；全部用繁體中文。"
+PLAYBOOK = PROJECT_ROOT / "config" / "research_playbook.md"
+
+
+def playbook() -> str:
+    """個股研究分析手冊（去掉標題與說明行）；檔案不存在時回傳空字串。"""
+    if not PLAYBOOK.exists():
+        return ""
+    lines = [ln for ln in PLAYBOOK.read_text(encoding="utf-8").splitlines() if ln.strip() and not ln.startswith("#")
+             and not ln.startswith("改這份")]
+    return "分析原則：\n" + "\n".join(lines)
 
 
 def _fact_line(ctx: RunContext, key: str) -> str:
@@ -147,11 +160,13 @@ class LLMResearchAgent(LLMAgent):
         return (
             "你是台股主動式 ETF 的個股研究員。"
             f"ETF 主題：{ctx.settings.theme.name}。{ctx.settings.theme.description}\n"
-            "每檔股票附上量化工具算好的優質動能分數（品質與動能各半，z 分數）與相關事實（價量、財報、重大訊息）。"
+            f"每檔股票附上量化工具算好的優質動能分數（{ctx.settings.strategy.describe()}，z 分數）、"
+            "相關事實（價量含近期高低點、財報、月營收含較上月增減、重大訊息），以及工具偵測的矛盾訊號。"
             "請逐檔判斷 view（positive／neutral／negative）與 score（-3～3，可參考量化分數但要有自己的判斷，"
             "例如評價過高、短線過熱、獲利轉弱都可調整）；有重大訊息的股票必須評估該訊息的影響並引用它。"
             "logic 60–350 字，必須引用該股事實代號（寫成 {F12} 這種格式），說明判斷依據；"
-            "conclusion 40 字內；counter_evidence 寫反方訊號（沒有就 null）。"
+            "conclusion 40 字內；counter_evidence 寫反方訊號（沒有就 null）。\n"
+            + playbook() + "\n"
             + NO_INFER +
             '\n輸出 JSON：{"theses":[{"ticker":"2330","view":"positive","score":1.2,"premises":["F12"],'
             '"logic":"…","conclusion":"…","counter_evidence":"…"}]}，每檔都要輸出。'
@@ -164,9 +179,10 @@ class LLMResearchAgent(LLMAgent):
             t = self._base[c]
             facts = "\n".join(_fact_line(ctx, k) for k in sorted(self._allowed[c], key=lambda k: int(k[1:])))
             tag = "主題核心池" if c in theme else ("非核心池（衛星）" if theme else "")
+            found = "；".join(x.text for x in conflicts(ctx.metrics[c])) if c in ctx.metrics else ""
             blocks.append(f"■ {ctx.name(c)} {tag} 量化分數 {t.score:+.2f}"
                           + (f"（反方審查意見：{t.counter_evidence}）" if c in self._weak and t.counter_evidence else "")
-                          + f"\n{facts}")
+                          + f"\n工具偵測的矛盾：{found or '無'}\n{facts}")
         return f"交易日 {ctx.window.trade_date}，共 {len(codes)} 檔：\n\n" + "\n\n".join(blocks)
 
     def build_prompt(self, ctx: RunContext, inputs: dict[str, Any], feedback: list[str] | None) -> tuple[str, str]:
@@ -231,6 +247,14 @@ class LLMResearchAgent(LLMAgent):
             for c, t in out.items():
                 if c not in done and t.view == "positive":
                     t.view = "neutral"
+        else:
+            # 退回重寫後仍沒解釋矛盾訊號的正向推論，看法降為中性
+            for c in done:
+                t = out[c]
+                notes = conflict_notes(ctx, t)
+                if notes:
+                    t.view = "neutral"
+                    t.counter_evidence = "；".join(filter(None, [t.counter_evidence, *notes, "重寫後仍未解釋，看法降為中性"]))[:500]
         return list(out.values())
 
 
@@ -238,19 +262,29 @@ class LLMResearchAgent(LLMAgent):
 
 class LLMReviewerAgent(LLMAgent):
     name = "reviewer"
-    MAX_WEAK = 6
+    MAX_WEAK = 6  # LLM 自己挑的上限；程式偵測到的未解釋矛盾另外一律退回
 
     def build_prompt(self, ctx: RunContext, inputs: dict[str, Any], feedback: list[str] | None) -> tuple[str, str]:
         theses = [t for t in inputs["theses"] if t.author == "research/llm" and t.view == "positive"]
         self._keys = {t.key for t in inputs["theses"]}
+        self._auto = {t.key: notes for t in inputs["theses"] if (notes := conflict_notes(ctx, t))}
         system = (
-            "你是投資團隊的反方審查員（devil's advocate）。逐一檢查研究員的正向推論："
-            "論據是否真的由引用的事實支持、是否忽略了明顯的反向事實（例如短線漲幅過大、評價過高、獲利衰退、流動性不足）。"
-            f"只挑出論據最薄弱的最多 {self.MAX_WEAK} 筆標為 weak，並在 note（80 字內）說明理由；其餘不用輸出。"
-            '\n輸出 JSON：{"reviews":[{"key":"T:2330","verdict":"weak","note":"…"}]}'
+            "你是投資團隊的反方審查員（devil's advocate）。逐一檢查研究員的正向推論：\n"
+            "1. 論據是否真的由引用的事實支持，數字有沒有被誤讀。\n"
+            "2. 股價走勢與基本面是否矛盾而推論沒有解釋：例如營收年增很高但較上月大減、"
+            "前波大漲後自高點大幅回落（可能是獲利了結）、評價過高、獲利衰退、流動性不足。"
+            "「工具偵測的矛盾」由程式計算，推論沒有回應的會自動退回，你不必重複；請找出工具沒抓到的問題。\n"
+            "3. 推論是否只是把數字複述一遍，沒有說明這些數字為什麼支持正向看法。\n"
+            f"只挑出論據最薄弱的最多 {self.MAX_WEAK} 筆標為 weak，note（80 字內）具體寫出缺了什麼解釋；其餘不用輸出。\n"
+            "研究員應遵守的" + playbook()
+            + '\n輸出 JSON：{"reviews":[{"key":"T:2330","verdict":"weak","note":"…"}]}'
         )
-        blocks = [f"■ {t.key} 結論：{t.conclusion}\n推論：{t.logic}\n反方訊號：{t.counter_evidence or '無'}\n事實：\n"
-                  + "\n".join(_fact_line(ctx, k) for k in t.premises) for t in theses]
+        blocks = []
+        for t in theses:
+            found = [c.text for c in conflicts(ctx.metrics[t.tickers[0]])] if t.tickers and t.tickers[0] in ctx.metrics else []
+            blocks.append(f"■ {t.key} 結論：{t.conclusion}\n推論：{t.logic}\n反方訊號：{t.counter_evidence or '無'}\n"
+                          f"工具偵測的矛盾：{'；'.join(found) or '無'}\n事實：\n"
+                          + "\n".join(_fact_line(ctx, k) for k in t.premises))
         return system, f"共 {len(blocks)} 筆正向推論：\n\n" + "\n\n".join(blocks or ["（無）"])
 
     def parse(self, ctx: RunContext, inputs: dict[str, Any], data: Any) -> list[Review]:
@@ -263,6 +297,8 @@ class LLMReviewerAgent(LLMAgent):
                 note = it.get("note") if isinstance(it.get("note"), str) else ""
                 weak[it["key"]] = note.strip()[:120] or "論據不足"
         weak = dict(list(weak.items())[:self.MAX_WEAK])
+        for k, notes in self._auto.items():
+            weak[k] = "、".join(([weak[k]] if k in weak else []) + notes)[:120]
         return [Review(k, "weak", weak[k]) if k in weak else Review(k, "ok") for k in sorted(self._keys)]
 
 
@@ -281,7 +317,9 @@ class LLMPortfolioManagerAgent(LLMAgent):
         theme = ctx.theme.members if ctx.theme and ctx.theme.active else set()
         n_target = round((risk.min_holdings + risk.max_holdings) / 2)
         equity = 1 - mv.cash_target
-        self._cands = [c for c, t in theses.items() if c not in ctx.held and c in prices
+        swaps = ctx.settings.strategy.max_swaps
+        self._anchors = anchor_codes(ctx)
+        self._cands = [c for c, t in theses.items() if c not in ctx.held and c in prices and c not in self._anchors
                        and (t.view == "positive" or (t.view == "neutral" and t.author.endswith("/llm")))
                        and prices[c] * 1000 <= 0.5 * equity / n_target * nav]
         self._cands.sort(key=lambda c: (theses[c].view != "positive", -(theses[c].score or 0)))
@@ -293,7 +331,9 @@ class LLMPortfolioManagerAgent(LLMAgent):
             f"ETF 主題：{ctx.settings.theme.name}。{ctx.settings.theme.description}\n"
             f"限制：交易後持股 {risk.min_holdings}–{risk.max_holdings} 檔（建議 {n_target} 檔左右）；"
             + (f"非主題核心池的股票最多 {max_out} 檔；" if theme else "")
-            + "已持有的股票除非推論轉為負向或排名明顯落後，否則續抱（每天最多賣出 3 檔，控制周轉成本）；"
+            + (f"市值前 {len(self._anchors)} 大（{'、'.join(self._anchors)}）由工具依市值比例自動納入，不要列入買賣名單，也計入檔數；"
+               if self._anchors else "")
+            + f"已持有的股票除非推論轉為負向或排名明顯落後，否則續抱（每天最多賣出 {swaps} 檔；交易成本一買一賣約 0.585%，頻繁換股會侵蝕績效）；"
             "新買進只能從候選清單挑選（照抄清單中的代號）；優先選看法正向的，正向不足檔數下限時再用中性的補足。"
             "權重與股數會由工具依現金目標計算，你只需決定名單與加碼／減碼名單。"
             "logic（100–500 字）說明組合理由，可以引用市場事實代號（寫成 {F1} 格式）。"
@@ -322,14 +362,16 @@ class LLMPortfolioManagerAgent(LLMAgent):
             v = data.get(name) or []
             return [str(c) for c in v] if isinstance(v, list) else []
 
-        sell = [c for c in codes("sell") if c in ctx.held]
+        pinned = set(risk.floors) | set(self._anchors)
+        sell = [c for c in codes("sell") if c in ctx.held and c not in pinned]
         buy = [c for c in dict.fromkeys(codes("buy")) if c in self._cands]
-        bad = [c for c in codes("buy") if c not in self._cands and c not in ctx.held]
+        bad = [c for c in codes("buy") if c not in self._cands and c not in ctx.held and c not in pinned]
         if bad:
             raise LLMError(f"買進名單 {bad} 不在候選清單內")
-        if len(sell) > 3 and not ctx.datapack.is_first_day:
-            raise LLMError(f"一天最多賣出 3 檔，你賣出了 {len(sell)} 檔")
-        after = (ctx.held - set(sell)) | set(buy) | {t for t, w in risk.floors.items()}
+        swaps = ctx.settings.strategy.max_swaps
+        if len(sell) > swaps and not ctx.datapack.is_first_day:
+            raise LLMError(f"一天最多賣出 {swaps} 檔，你賣出了 {len(sell)} 檔")
+        after = (ctx.held - set(sell)) | set(buy) | pinned
         if not risk.min_holdings <= len(after) <= risk.max_holdings:
             raise LLMError(f"交易後持股 {len(after)} 檔，必須介於 {risk.min_holdings}–{risk.max_holdings}")
         if theme and sum(c not in theme for c in after) > max_out:

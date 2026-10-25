@@ -6,13 +6,13 @@ from typing import Any
 
 from ..framework.context import RunContext
 from ..framework.contracts import Thesis
+from ..tools.signals import conflicts
 
 MIN_AVG_VALUE = 2e8  # 近 20 日平均成交值低於 2 億元視為流動性不足
-MOMENTUM_WEIGHTS = {"ret_60d": 0.4, "ret_20d": 0.4, "ret_5d": 0.2}
 QUALITY_WEIGHTS = {"roe": 0.35, "eps_growth": 0.25, "rev_cum_yoy": 0.25, "cash_conversion": 0.15}
 QUALITY_CLIP = {"roe": (-20, 60), "eps_growth": (-100, 200), "rev_cum_yoy": (-50, 100), "cash_conversion": (-1, 3)}
-QUALITY_SHARE = 0.5  # 綜合分數 = 0.5×品質 + 0.5×動能（沒有財報資料時全看動能）
 LOSS_PENALTY = 1.0
+# 動能天數與權重、品質比重見設定檔 strategy（沒有財報資料時全看動能）
 
 
 def zscores(values: dict[str, float]) -> dict[str, float]:
@@ -38,7 +38,7 @@ def weighted_z(candidates: list[str], getter, weights: dict[str, float],
 
 
 class RuleResearchAgent:
-    """優質動能規則：品質（ROE、EPS 年增、營收年增、現金流量）＋動能（60／20／5 日報酬），近四季虧損扣分。"""
+    """優質動能規則：品質（ROE、EPS 年增、營收年增、現金流量）＋動能（設定的多個天數報酬），近四季虧損扣分。"""
     name = "research"
     variant = "rule"
 
@@ -51,10 +51,11 @@ class RuleResearchAgent:
         taiex_fact = inputs.get("taiex_trend_fact")
         taiex_20d = ctx.market_metrics.get("taiex_ret_20d")
 
+        strategy = ctx.settings.strategy
         fund = {c: metrics[c].fund for c in candidates if metrics[c].fund is not None and metrics[c].fund_fact}
-        momentum = weighted_z(candidates, lambda c, n: getattr(metrics[c], n), MOMENTUM_WEIGHTS)
+        momentum = weighted_z(candidates, lambda c, n: metrics[c].ret(n), strategy.momentum)
         quality = weighted_z(list(fund), lambda c, n: getattr(fund[c], n), QUALITY_WEIGHTS, QUALITY_CLIP)
-        q_share = QUALITY_SHARE if fund else 0.0
+        q_share = strategy.quality_share if fund else 0.0
         scores: dict[str, float] = {}
         for c in candidates:
             s = (1 - q_share) * momentum[c] + q_share * quality.get(c, 0.0)
@@ -69,7 +70,7 @@ class RuleResearchAgent:
         for c in candidates:
             m, s, f = metrics[c], scores[c], fund.get(c)
             premises = [m.fact]
-            parts = [f"近 {n} 個交易日 {v:+.2f}%" for n, v in ((60, m.ret_60d), (20, m.ret_20d), (5, m.ret_5d)) if v is not None]
+            parts = [f"近 {n} 個交易日 {v:+.2f}%" for n in sorted(strategy.momentum, reverse=True) if (v := m.ret(n)) is not None]
             logic = f"{c} {m.name}（{{{m.fact}}}）" + ("、".join(parts) or f"收盤 {m.close:g} 元")
             if taiex_fact and taiex_20d is not None and m.ret_20d is not None:
                 premises.append(taiex_fact)
@@ -106,9 +107,15 @@ class RuleResearchAgent:
                 premises += news
                 logic += "；近期重大訊息（" + "、".join(f"{{{k}}}" for k in news) + "）列入追蹤，未納入分數"
 
-            trend = m.ret_60d if m.ret_60d is not None else m.ret_20d
+            trend = m.ret(strategy.trend_lookback)
+            if trend is None:
+                trend = m.ret_20d
+            found = conflicts(m)
             if c in weak or (f is not None and f.profitable_ttm is False and s > -0.5):
                 view = "neutral"
+            elif s >= 0.25 and (trend or 0) > 0 and len(found) >= 2:
+                view = "neutral"
+                logic += f"；分數達正向門檻，但同時有 {len(found)} 項矛盾訊號，暫列中性"
             elif s >= 0.25 and (trend or 0) > 0:
                 view = "positive"
             elif s <= -0.5:
@@ -132,6 +139,7 @@ class RuleResearchAgent:
                     counters.append(f"EPS 年減 {abs(f.eps_growth):.1f}%，獲利動能轉弱")
                 if f.cash_conversion is not None and f.cash_conversion < 0.5:
                     counters.append("營業現金流不到淨利的一半，獲利品質需留意")
+            counters += [f"矛盾訊號：{x.text}" for x in found if x.code != "high_valuation"]  # 本益比已在上面
             if c in weak:
                 counters.append("反方審查認為論據不足，看法下修為中性")
             out.append(Thesis(

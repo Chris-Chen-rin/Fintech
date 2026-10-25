@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..framework.context import RunContext
@@ -28,6 +28,14 @@ class StockMetrics:
     fact: str | None = None
     fund: Any = None  # Fundamentals
     fund_fact: str | None = None
+    rets: dict[int, float | None] = field(default_factory=dict)  # 交易日數 → 報酬（%），含策略設定的動能天數
+    high: tuple[Any, float] | None = None  # 近 60 個交易日最高收盤（日期, 價）
+    low: tuple[Any, float] | None = None
+    from_high: float | None = None  # 距最高收盤 %（≤ 0）
+    low_to_high: float | None = None  # 低點在高點之前時，低點到高點的漲幅 %（看前一波漲多少）
+
+    def ret(self, n: int) -> float | None:
+        return self.rets[n] if n in self.rets else getattr(self, f"ret_{n}d", None)
 
 
 def pct(x: float) -> str:
@@ -93,7 +101,8 @@ def build_market_facts(ctx: RunContext) -> list[str]:
 
 def build_stock_metrics(ctx: RunContext) -> dict[str, StockMetrics]:
     h = ctx.history
-    last, d5, d20, d60 = h.last, h.ago(5), h.ago(20), h.ago(60)
+    last = h.last
+    ago = {n: h.ago(n) for n in ctx.settings.strategy.lookbacks}
     out: dict[str, StockMetrics] = {}
     window = h.dates[-21:]
     for code, name in ctx.universe.items():
@@ -105,22 +114,29 @@ def build_stock_metrics(ctx: RunContext) -> dict[str, StockMetrics]:
         rets = [math.log(b / a) for a, b in zip(closes, closes[1:]) if a and b]
         values = [v for v in (h.quote(code, d) for d in window[1:]) if v and v.value]
         chg_pct = round(q.change / q.prev_close * 100, 2) if q.change is not None and q.prev_close else None
-        out[code] = StockMetrics(
+        by_n = {n: _ret(q.close, h.close(code, d)) if d else None for n, d in ago.items()}
+        m = out[code] = StockMetrics(
             code=code, name=name, market=market, close=q.close, chg_pct=chg_pct,
-            ret_5d=_ret(q.close, h.close(code, d5)) if d5 else None,
-            ret_20d=_ret(q.close, h.close(code, d20)) if d20 else None,
+            ret_5d=by_n[5], ret_20d=by_n[20],
             avg_value=statistics.fmean(v.value for v in values) if values else None,
             volatility=statistics.pstdev(rets) if len(rets) >= 5 else None,
-            ret_60d=_ret(q.close, h.close(code, d60)) if d60 else None,
-            fund=ctx.fundamentals.get(code),
+            ret_60d=by_n[60], fund=ctx.fundamentals.get(code), rets=by_n,
         )
+        span = [(d, c) for d in h.dates[-61:] if (c := h.close(code, d))]
+        if len(span) >= 20:
+            m.high = max(span, key=lambda x: x[1])
+            m.low = min(span, key=lambda x: x[1])
+            m.from_high = _ret(q.close, m.high[1])
+            if m.low[0] < m.high[0]:
+                m.low_to_high = _ret(m.high[1], m.low[1])
     return out
 
 
 def build_stock_facts(ctx: RunContext) -> None:
     """每檔標的一筆價量事實；只有被推論引用的才會出現在 D-Plan。"""
     h, reg = ctx.history, ctx.registry
-    last, d5, d20, d60 = h.last, h.ago(5), h.ago(20), h.ago(60)
+    last = h.last
+    ago = {n: h.ago(n) for n in ctx.settings.strategy.lookbacks}
     for code, m in ctx.metrics.items():
         srcs = [reg.add_day_quotes(h.day_quotes(m.market, last))]
         text = f"{code} {m.name} {last:%m/%d} 收盤 {price_text(m.close)} 元"
@@ -128,13 +144,23 @@ def build_stock_facts(ctx: RunContext) -> None:
         if m.chg_pct is not None:
             text += f"，當日 {pct(m.chg_pct)}"
             values["chg_pct"] = m.chg_pct
-        for n, day, r in ((5, d5, m.ret_5d), (20, d20, m.ret_20d), (60, d60, m.ret_60d)):
+        for n, day in ago.items():
+            r = m.ret(n)
             if r is None or day is None:
                 continue
             base = h.close(code, day)
             text += f"；較 {day:%m/%d} 收盤 {price_text(base)} 元變動 {pct(r)}（{n} 個交易日）"
             values[f"ret_{n}d_pct"] = r
             srcs.append(reg.add_day_quotes(h.day_quotes(m.market, day)))
-        m.fact = ctx.facts.add(srcs, text, values, "price_momentum", code)
+        if m.high and m.low and m.from_high is not None:
+            (hd, hp), (ld, lp) = m.high, m.low
+            text += (f"；近 {min(60, len(h.dates) - 1)} 個交易日最高收盤 {price_text(hp)} 元（{hd:%m/%d}）、"
+                     f"最低收盤 {price_text(lp)} 元（{ld:%m/%d}），目前距最高收盤 {pct(m.from_high)}")
+            values |= {"high_close": hp, "low_close": lp, "from_high_pct": m.from_high}
+            if m.low_to_high is not None:
+                text += f"，低點到高點上漲 {pct(m.low_to_high)}"
+                values["low_to_high_pct"] = m.low_to_high
+            srcs += [reg.add_day_quotes(h.day_quotes(m.market, d)) for d in (hd, ld) if d != last]
+        m.fact = ctx.facts.add(list(dict.fromkeys(srcs))[:10], text, values, "price_momentum", code)
         if m.fund is not None:
             m.fund_fact = m.fund.add_fact(ctx, m.name)

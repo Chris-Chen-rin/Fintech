@@ -169,6 +169,11 @@ class Fundamentals:
     rev_month: str | None = None  # 11509
     rev_yoy: float | None = None
     rev_cum_yoy: float | None = None
+    rev_mom: float | None = None  # 較上月增減 %
+    rev_amount: float | None = None  # 當月營收（千元）
+    rev_prev_month: str | None = None  # 前一個月，看趨勢用
+    rev_prev_yoy: float | None = None
+    rev_prev_mom: float | None = None
     pe: float | None = None
     pb: float | None = None
     dividend_yield: float | None = None
@@ -239,13 +244,28 @@ class Fundamentals:
             parts.append(text)
         if self.rev_month and self.rev_yoy is not None:
             month = int(self.rev_month[-2:])
-            text = f"{month} 月營收年增 {self.rev_yoy:+.2f}%"
+            text = f"{month} 月營收"
+            if self.rev_amount is not None:
+                text += f" {self.rev_amount / 1e5:,.2f} 億元、"
+                values["rev_100m"] = round(self.rev_amount / 1e5, 2)
+            if self.rev_mom is not None:
+                text += f"較上月 {self.rev_mom:+.2f}%、"
+                values["rev_mom_pct"] = round(self.rev_mom, 2)
+            text += f"年增 {self.rev_yoy:+.2f}%"
             values["rev_yoy_pct"] = round(self.rev_yoy, 2)
             if self.rev_cum_yoy is not None:
                 text += f"、累計年增 {self.rev_cum_yoy:+.2f}%"
                 values["rev_cum_yoy_pct"] = round(self.rev_cum_yoy, 2)
-            parts.append(text)
             cite("revenue")
+            if self.rev_prev_month and self.rev_prev_yoy is not None:
+                text += f"（前一月 {int(self.rev_prev_month[-2:])} 月"
+                if self.rev_prev_mom is not None:
+                    text += f"較上月 {self.rev_prev_mom:+.2f}%、"
+                    values["rev_prev_mom_pct"] = round(self.rev_prev_mom, 2)
+                text += f"年增 {self.rev_prev_yoy:+.2f}%）"
+                values["rev_prev_yoy_pct"] = round(self.rev_prev_yoy, 2)
+                cite("revenue_prev")
+            parts.append(text)
         if self.valuation_date and (self.pe or self.pb):
             text = f"{self.valuation_date:%m/%d} "
             text += f"本益比 {self.pe:g} 倍" if self.pe else "本益比無（近四季虧損）"
@@ -384,7 +404,8 @@ class FundamentalsLoader:
         for table in p.tables:
             for row in table:
                 if len(row) >= 10 and re.fullmatch(r"\d{4,6}[A-Z]?", row[0]):
-                    rows[row[0]] = {"yoy": num(row[6]), "cum_yoy": num(row[9])}
+                    # 欄位：代號、名稱、當月營收、上月營收、去年當月、上月比較增減%、去年同月增減%、當月累計、去年累計、前期比較增減%
+                    rows[row[0]] = {"yoy": num(row[6]), "cum_yoy": num(row[9]), "mom": num(row[5]), "amount": num(row[2])}
         if not rows:
             return None
         y, m = year + 1911, month
@@ -405,6 +426,7 @@ class FundamentalsLoader:
         months = [(last.year - 1911, last.month), (prev.year - 1911, prev.month)]
         for foreign in (False, True):
             todo = {c for c in codes if out[c].rev_month is None}
+            got: set[str] = set()
             for year, month in months:
                 if not todo:
                     break
@@ -412,11 +434,26 @@ class FundamentalsLoader:
                 if table is None:
                     continue
                 for c in [c for c in todo if c in table.rows]:
-                    f = out[c]
+                    f, row = out[c], table.rows[c]
                     f.rev_month = f"{year}{month:02d}"
-                    f.rev_yoy, f.rev_cum_yoy = table.rows[c]["yoy"], table.rows[c]["cum_yoy"]
+                    f.rev_yoy, f.rev_cum_yoy = row["yoy"], row["cum_yoy"]
+                    f.rev_mom, f.rev_amount = row.get("mom"), row.get("amount")
                     f.records["revenue"] = table.record
                     todo.discard(c)
+                    got.add(c)
+            # 前一個月的年增與月增減：看營收動能是延續還是轉弱
+            pages: dict[tuple[int, int], Table | None] = {}
+            for c in sorted(got):
+                f = out[c]
+                y, m = int(f.rev_month[:-2]), int(f.rev_month[-2:])
+                py, pm = (y, m - 1) if m > 1 else (y - 1, 12)
+                if (py, pm) not in pages:
+                    pages[(py, pm)] = self.revenue_page(market, py, pm, foreign)
+                table = pages[(py, pm)]
+                if table is not None and c in table.rows:
+                    f.rev_prev_month = f"{py}{pm:02d}"
+                    f.rev_prev_yoy, f.rev_prev_mom = table.rows[c]["yoy"], table.rows[c].get("mom")
+                    f.records["revenue_prev"] = table.record
 
     def _load_valuation(self, market: str, codes: set[str], out: dict[str, Fundamentals]) -> None:
         """指定日期（資料截止日）的本益比、殖利率、股價淨值比；按日期查詢，不會用到未來資料。"""

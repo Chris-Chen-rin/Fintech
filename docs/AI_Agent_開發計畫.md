@@ -223,13 +223,18 @@ Fintech/
 
 ```powershell
 # 用過去的真實行情連續演練多天（第 1 天建倉，之後每天用前一天的成交結果當持股；結果在 rehearsals/<起>_<迄>/summary.json）
+# 預設用規則版、不耗 LLM 額度；加 --llm 才用設定檔的模型（每天約 9～12 次呼叫）
 .venv\Scripts\python.exe -m agent rehearse --start 2026-10-01 --end 2026-10-22
-# 降級：LLM 故障或免費額度（每天 50 次）用完時，全部改用規則版
+# 回測搜尋策略參數（config/optimize_grid.yaml 的所有組合，規則版、離線平行；--review 用 1 次 LLM 挑選並寫理由）
+.venv\Scripts\python.exe -m agent optimize --start 2026-04-01 --end 2026-10-22 --split 2026-07-31 --workers 6 --review
+# 降級：LLM 故障或額度用完時，全部改用規則版
 .venv\Scripts\python.exe -m agent run --rules-only
 ```
 
-LLM 額度：OpenRouter 免費模型每天 50 次（UTC 00:00＝台北 08:00 重置）。一次完整執行約 12～17 次，費時約 20 分鐘。
-`llm.max_calls_per_run`（預設 20）與 `llm.daily_call_limit`（預設 45）超過時 LLM 版直接改用規則版，計數存在 `cache/llm_calls.json`，`doctor` 會顯示今日已用次數。
+策略參數在 `settings.yaml` 的 `strategy`：動能天數與權重（`momentum`）、品質比重（`quality_share`）、市值前 N 大依市值比例配置（`anchor_top_n`，超過個股上限的部分給分數高的其他股票）、每日出清上限（`max_swaps`）。回測含手續費 0.1425%、證交稅 0.3%、無交易帶與每日出清上限，結果在 `rehearsals/optimize_<起>_<迄>/results.md`。
+
+LLM 額度：Gemini Flash-Lite 約 500 次／天、3.8 Flash 約 20 次／天（太平洋時間午夜重置，約台北 15:00～16:00）。一次完整執行約 9～12 次，其中 3.8 Flash 2～3 次。
+`llm.max_calls_per_run`（30）與 `llm.daily_call_limit`（150）、個別模型的 `daily_limit` 超過時改用下一個備援模型，最後改用規則版；計數存在 `cache/llm_calls.json`，`doctor` 會顯示今日已用次數。
 **正式交件當天不要先試跑**，把額度留給正式執行。模型回傳的 JSON 有小錯（未跳脫的引號、多餘逗號、輸出被截斷）時會先自動修復再解析。
 
 ### 7.1 10/26 晚上首日驗收步驟

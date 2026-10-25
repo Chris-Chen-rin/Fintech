@@ -36,11 +36,27 @@ def waterfill(raw: dict[str, float], total: float, caps: dict[str, float],
     return out
 
 
+def anchor_codes(ctx: RunContext) -> list[str]:
+    """市值前 N 大（strategy.anchor_top_n）；0 表示不使用市值錨定。"""
+    n = ctx.settings.strategy.anchor_top_n
+    if not n:
+        return []
+    ranked = sorted((m.fund.market_cap_rank, c) for c, m in ctx.metrics.items()
+                    if m.fund is not None and m.fund.market_cap_rank and c in ctx.prices)
+    return [c for _, c in ranked[:n]]
+
+
+def anchor_weights(ctx: RunContext, codes: list[str], equity: float, caps: dict[str, float]) -> dict[str, float]:
+    """股票部位依市值比例分給錨定股，超過權重上限的部分不在錨定股之間重分，留給其他股票。"""
+    mcap = {c: ctx.metrics[c].fund.market_cap for c in codes}
+    total = sum(mcap.values())
+    return {c: min(caps[c], equity * v / total) for c, v in mcap.items()} if total > 0 else {}
+
+
 class RulePortfolioManagerAgent:
     """分數排序選股、分數傾斜加權、無交易帶、每日換股上限；依現金目標反覆校正。"""
     name = "portfolio_manager"
     variant = "rule"
-    MAX_SWAPS = 3
     TILT = 0.25
 
     def run(self, ctx: RunContext, inputs: dict[str, Any], feedback: list[str] | None = None) -> PortfolioPlan:
@@ -48,6 +64,7 @@ class RulePortfolioManagerAgent:
         theses: dict[str, Thesis] = {t.tickers[0]: t for t in inputs["theses"] if len(t.tickers) == 1}
         book, nav, prices = ctx.book, ctx.book.nav, ctx.prices
         risk = ctx.settings.risk
+        max_swaps = ctx.settings.strategy.max_swaps
         held = ctx.held
         theme_score = ctx.theme.score if ctx.theme else (lambda code: 0.0)
         retry = len(feedback or [])
@@ -65,7 +82,7 @@ class RulePortfolioManagerAgent:
         drops: list[str] = []
         if held:
             weak = [t for t in held if t in theses and theses[t].view == "negative" and rank[t] > n_target * 1.5]
-            drops = sorted(weak, key=score)[:self.MAX_SWAPS]
+            drops = sorted(weak, key=score)[:max_swaps]
         keep = [t for t in held if t not in drops]
         if len(keep) > risk.max_holdings:
             extra = sorted(keep, key=score)[:len(keep) - risk.max_holdings]
@@ -106,12 +123,15 @@ class RulePortfolioManagerAgent:
             keep = [t for t in held if t not in drops]
             new = [t for t in choice["buy"] if t not in held and t in prices]
         floors = {t: w for t, w in risk.floors.items() if t in prices}
-        forced = [t for t in floors if t not in keep and t not in new]
-        if forced:  # 設了最低持有比例的個股一定納入，擠掉分數最低的新買進
-            new = [t for t in new if t not in floors]
+        anchors = anchor_codes(ctx)
+        self._anchors = anchors
+        pinned = list(dict.fromkeys([*floors, *anchors]))
+        drops = [t for t in drops if t not in pinned]
+        keep = list(dict.fromkeys(keep + [t for t in pinned if t in held]))
+        forced = [t for t in pinned if t not in keep]
+        if forced:  # 最低持有比例與市值錨定的個股一定納入，擠掉分數最低的新買進
+            new = [t for t in new if t not in pinned]
             new = sorted(new, key=score, reverse=True)[:max(0, n_target - len(keep) - len(forced))] + forced
-        drops = [t for t in drops if t not in floors]
-        keep = list(dict.fromkeys(keep + [t for t in floors if t in held]))
         selected = keep + new
 
         scores = {t: score(t) for t in selected if t in theses}
@@ -122,6 +142,14 @@ class RulePortfolioManagerAgent:
             for t in raw:
                 raw[t] *= 1.3 if t in choice["overweight"] else 0.7 if t in choice["underweight"] else 1.0
         caps = {t: risk.weight_cap(t) - margin for t in raw}
+        anchored = [t for t in anchors if t in raw]
+
+        def targets(equity: float) -> dict[str, float]:
+            if not anchored:
+                return waterfill(raw, equity, caps, floors)
+            fixed = {t: max(floors.get(t, 0.0), w) for t, w in anchor_weights(ctx, anchored, equity, caps).items()}
+            rest = {t: r for t, r in raw.items() if t not in fixed}
+            return waterfill(rest, max(0.0, equity - sum(fixed.values())), caps, floors) | fixed
 
         w_cur = {t: book.shares(t) * prices[t] / nav for t in held if t in prices}
         ceiling = hi - 0.003
@@ -130,7 +158,7 @@ class RulePortfolioManagerAgent:
         alpha = 0.7 ** retry  # 既有持股往目標調整的幅度；退回次數越多調整越保守
         plan, goal = None, cash_goal
         for _ in range(40):
-            base = waterfill(raw, equity, caps, floors)
+            base = targets(equity)
             weights = {t: max(floors.get(t, 0.0), w_cur[t] + alpha * (w - w_cur[t]))
                        if t in w_cur and w_cur[t] <= caps[t] else w for t, w in base.items()}
             plan = self._build(ctx, mv, theses, weights, selected, drops)
@@ -191,15 +219,20 @@ class RulePortfolioManagerAgent:
         return PortfolioPlan(decisions, no_trades, [construction])
 
     def _construction_thesis(self, ctx: RunContext, mv: MarketView, n_selected: int, n_candidates: int) -> Thesis:
-        risk = ctx.settings.risk
+        risk, strategy = ctx.settings.risk, ctx.settings.strategy
         tokens = " ".join(f"{{{k}}}" for k in mv.basis)
         pool = (f"（主題核心池 {len(ctx.theme.members)} 檔優先）" if ctx.theme and ctx.theme.active else "")
         logic = (f"依市場事實 {tokens} 的判斷（{mv.regime}／{mv.stance}），目標現金比 {mv.cash_target:.0%}、"
-                 f"宣告區間 {mv.cash_range[0]:.0%}–{mv.cash_range[1]:.0%}。組合規則：從 {n_candidates} 檔候選{pool}中依優質動能綜合分數挑選 "
-                 f"{n_selected} 檔，以分數傾斜 ±{self.TILT:.0%} 的等權重配置，2330 上限 {risk.tsmc_max_weight:.0%}、其他個股 "
-                 f"{risk.stock_max_weight:.0%}；權重偏離小於 {risk.no_trade_band:.1%} 的持股不調整，每日最多出清 {self.MAX_SWAPS} 檔以控制周轉成本。")
+                 f"宣告區間 {mv.cash_range[0]:.0%}–{mv.cash_range[1]:.0%}。組合規則：從 {n_candidates} 檔候選{pool}中依優質動能綜合分數"
+                 f"（{strategy.describe()}）挑選 {n_selected} 檔，以分數傾斜 ±{self.TILT:.0%} 的等權重配置，2330 上限 {risk.tsmc_max_weight:.0%}、其他個股 "
+                 f"{risk.stock_max_weight:.0%}；權重偏離小於 {risk.no_trade_band:.1%} 的持股不調整，每日最多出清 {strategy.max_swaps} 檔以控制周轉成本。")
+        extra = ""
+        anchors = getattr(self, "_anchors", [])
+        if anchors:
+            extra += (f"市值錨定：市值前 {len(anchors)} 大（{'、'.join(anchors)}）依市值比例配置，"
+                      "超過個股上限的部分改配置給綜合分數高的其他股票。")
         if risk.floors:
-            logic += "最低持有比例：" + "、".join(f"{t} {w:.0%}" for t, w in risk.floors.items()) + "。"
+            extra += "最低持有比例：" + "、".join(f"{t} {w:.0%}" for t, w in risk.floors.items()) + "。"
         author = "portfolio_manager/rule"
         choice = getattr(self, "_choice", None)
         if choice:
@@ -207,6 +240,7 @@ class RulePortfolioManagerAgent:
             logic = (choice["logic"] + f" 權重計算：分數傾斜 ±{self.TILT:.0%} 的等權重，加碼／減碼名單各乘 1.3／0.7，"
                      f"2330 上限 {risk.tsmc_max_weight:.0%}、其他個股 {risk.stock_max_weight:.0%}，"
                      f"偏離小於 {risk.no_trade_band:.1%} 不調整。")
+        logic += extra
         return Thesis(CONSTRUCTION, [], list(mv.basis), logic[:1000],
                       f"持股 {n_selected} 檔、股票部位約 {1 - mv.cash_target:.0%}", None, "neutral", None, None, author)
 

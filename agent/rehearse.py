@@ -80,7 +80,8 @@ def rehearsal_dir(settings: Settings, start: dt.date, end: dt.date) -> Path:
     return settings.paths.root / "rehearsals" / f"{start:%Y%m%d}_{end:%Y%m%d}"
 
 
-def rehearse(settings: Settings, start: dt.date, end: dt.date, offline: bool = False) -> list[dict[str, Any]]:
+def rehearse(settings: Settings, start: dt.date, end: dt.date, offline: bool = False, folder: Path | None = None,
+             announcements: bool = True) -> list[dict[str, Any]]:
     cal = TradingCalendar(settings.holidays)
     universe, markets = _universe_markets()
     store = PriceStore(HttpClient(settings.paths.cache, offline=offline), settings.paths.cache, universe, markets)
@@ -92,7 +93,7 @@ def rehearse(settings: Settings, start: dt.date, end: dt.date, offline: bool = F
     span = (end - history.dates[0]).days
     closed = {d for i in range(span + 1) if (d := history.dates[0] + dt.timedelta(days=i)).weekday() < 5
               and d not in history.dates}
-    folder = rehearsal_dir(settings, start, end)
+    folder = folder or rehearsal_dir(settings, start, end)
     if folder.exists():
         shutil.rmtree(folder)
     settings = replace(settings, holidays=frozenset(settings.holidays | closed),
@@ -115,7 +116,7 @@ def rehearse(settings: Settings, start: dt.date, end: dt.date, offline: bool = F
         try:
             result = run_daily(settings, RunOptions(datapack_path=dp_path, offline=offline, write_out=False,
                                                     now=dt.datetime.combine(prev, dt.time(20, 0), TPE),
-                                                    ignore_errors=IGNORED_ERRORS))
+                                                    ignore_errors=IGNORED_ERRORS, announcements=announcements))
         except Exception as exc:  # noqa: BLE001 - 演練要記下失敗原因並繼續
             row.update(ok=False, error=str(exc))
             result = None

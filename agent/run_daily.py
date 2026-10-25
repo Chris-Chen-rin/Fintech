@@ -59,9 +59,10 @@ class RunOptions:
     mock_first_day: bool = False
     now: dt.datetime | None = None
     offline: bool = False
-    history_days: int = 61  # 60 個交易日報酬（約 3 個月相對強度）
+    history_days: int = 61  # 至少 61（60 個交易日報酬）；策略用到更長的動能天數時自動加長
     write_out: bool = True
     ignore_errors: frozenset[str] = frozenset()  # 只供演練：例如初賽期間外的 trade_date
+    announcements: bool = True  # 回測時關閉：重大訊息不影響規則版分數，省下連線
 
 
 @dataclass
@@ -131,8 +132,9 @@ def run_daily(settings: Settings, opts: RunOptions | None = None) -> RunResult:
     client = HttpClient(settings.paths.cache, offline=opts.offline)
     store = PriceStore(client, settings.paths.cache, universe, markets)
     print(f"▶ {window.describe(moment)}")
-    print(f"▶ 抓取行情：截至 {window.prev_trading_date} 的 {opts.history_days} 個交易日（已抓過的日子直接用快取）")
-    history = load_history(store, window.prev_trading_date, opts.history_days, cal.is_trading_day)
+    n_days = max(opts.history_days, max(settings.strategy.lookbacks) + 1)
+    print(f"▶ 抓取行情：截至 {window.prev_trading_date} 的 {n_days} 個交易日（已抓過的日子直接用快取）")
+    history = load_history(store, window.prev_trading_date, n_days, cal.is_trading_day)
 
     prices = history.closes(history.last)
     for code, p in datapack.close_prices().items():
@@ -151,15 +153,16 @@ def run_daily(settings: Settings, opts: RunOptions | None = None) -> RunResult:
     except Exception as exc:  # noqa: BLE001 - 財報是加分資料，失敗時照常以價量交件
         fund_notes = [f"財報資料載入失敗，本次只用價量：{exc}"]
 
-    print("▶ 抓取重大訊息：公開資訊觀測站每日重大訊息（最近 5 天）")
     announcements: list[Any] = []
     news_records: list[Any] = []
-    try:
-        news = AnnouncementLoader(client, set(universe), moment)
-        announcements, news_records = news.load(), list(news.records.values())
-        fund_notes += news.notes
-    except Exception as exc:  # noqa: BLE001 - 重大訊息是加分資料，失敗時照常交件
-        fund_notes.append(f"重大訊息載入失敗：{exc}")
+    if opts.announcements:
+        print("▶ 抓取重大訊息：公開資訊觀測站每日重大訊息（最近 5 天）")
+        try:
+            news = AnnouncementLoader(client, set(universe), moment)
+            announcements, news_records = news.load(), list(news.records.values())
+            fund_notes += news.notes
+        except Exception as exc:  # noqa: BLE001 - 重大訊息是加分資料，失敗時照常交件
+            fund_notes.append(f"重大訊息載入失敗：{exc}")
 
     ctx = RunContext(settings=settings, window=window, datapack=datapack, universe=universe, markets=markets,
                      history=history, prices=prices, registry=SourceRegistry(), facts=FactBook(), run_dir=run_dir,

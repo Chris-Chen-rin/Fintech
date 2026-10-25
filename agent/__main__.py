@@ -114,10 +114,35 @@ def rehearse_cmd(args: argparse.Namespace) -> int:
         print(f"✗ {exc}")
         return 1
     start, end = dt.date.fromisoformat(args.start), dt.date.fromisoformat(args.end)
+    if not args.llm:
+        settings = dataclasses.replace(settings, llm=LLMSettings())
+        print("演練使用規則版 Agent（不耗 LLM 額度）；要用 LLM 版請加 --llm")
     rows = rehearse(settings, start, end, args.offline)
     print("\n" + format_rows(rows))
     print(f"\n明細：{rehearsal_dir(settings, start, end)}")
     return 0 if all(r.get("ok") for r in rows) else 1
+
+
+def optimize_cmd(args: argparse.Namespace) -> int:
+    from .optimize import GRID_FILE, optimize, review
+
+    try:
+        settings = load_settings(args.settings)
+    except SettingsError as exc:
+        print(f"✗ {exc}")
+        return 1
+    start, end = dt.date.fromisoformat(args.start), dt.date.fromisoformat(args.end)
+    split = dt.date.fromisoformat(args.split) if args.split else None
+    try:
+        results, out_dir = optimize(settings, start, end, split, args.grid or GRID_FILE, args.workers, args.offline)
+    except SettingsError as exc:
+        print(f"✗ {exc}")
+        return 1
+    print(f"\n結果表：{out_dir / 'results.md'}")
+    if args.review:
+        data = review(settings, results, split, out_dir)
+        print(f"LLM 審閱（{data['model']}，1 次呼叫）選擇：{data['choice']}；全文：{out_dir / 'review.md'}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,7 +166,17 @@ def main(argv: list[str] | None = None) -> int:
     p_reh.add_argument("--start", required=True, help="第一個交易日 YYYY-MM-DD（當天建倉）")
     p_reh.add_argument("--end", required=True, help="最後一個交易日 YYYY-MM-DD")
     p_reh.add_argument("--offline", action="store_true", help="只用快取，不連網")
+    p_reh.add_argument("--llm", action="store_true", help="使用設定檔的 LLM（每天約 9～12 次呼叫，會消耗每日額度）")
     p_reh.set_defaults(func=rehearse_cmd)
+    p_opt = sub.add_parser("optimize", help="回測搜尋策略參數（動能天數、品質比重、市值錨定），規則版、不耗 LLM 額度")
+    p_opt.add_argument("--start", required=True, help="回測第一個交易日 YYYY-MM-DD")
+    p_opt.add_argument("--end", required=True, help="回測最後一個交易日 YYYY-MM-DD")
+    p_opt.add_argument("--split", help="前段（挑參數）的最後一天；之後為後段（驗證）")
+    p_opt.add_argument("--grid", type=Path, help="參數表（預設 config/optimize_grid.yaml）")
+    p_opt.add_argument("--workers", type=int, default=4, help="平行程序數")
+    p_opt.add_argument("--offline", action="store_true", help="只用快取，不連網")
+    p_opt.add_argument("--review", action="store_true", help="跑完後用 1 次 LLM 呼叫挑選參數並寫理由")
+    p_opt.set_defaults(func=optimize_cmd)
     args = parser.parse_args(argv)
     return args.func(args)
 

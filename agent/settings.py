@@ -76,6 +76,31 @@ class RiskSettings:
 
 
 @dataclass(frozen=True)
+class StrategySettings:
+    """選股與配置的可調參數；回測（python -m agent optimize）就是在搜尋這些值。"""
+    momentum: dict[int, float] = field(default_factory=lambda: {60: 0.4, 20: 0.4, 5: 0.2})  # 交易日數: 權重
+    quality_share: float = 0.5  # 綜合分數 = quality_share×品質 + (1−quality_share)×動能
+    anchor_top_n: int = 0  # 市值前 N 大依市值比例配置（超過權重上限的部分分給分數高的其他股票）；0 = 不使用
+    max_swaps: int = 3  # 每天最多出清幾檔（首日不限）
+
+    @property
+    def lookbacks(self) -> tuple[int, ...]:
+        """事實與指標要算的報酬天數：固定的 5／20／60 日（市場判斷、反方訊號會用）加上動能用到的天數。"""
+        return tuple(sorted({5, 20, 60} | set(self.momentum)))
+
+    @property
+    def trend_lookback(self) -> int:
+        return max(self.momentum)
+
+    def describe(self) -> str:
+        mom = "、".join(f"{n} 日 {w:.0%}" for n, w in sorted(self.momentum.items(), reverse=True))
+        text = f"動能（{mom}）占 {1 - self.quality_share:.0%}、品質占 {self.quality_share:.0%}"
+        if self.anchor_top_n:
+            text += f"；市值前 {self.anchor_top_n} 大依市值比例配置"
+        return text
+
+
+@dataclass(frozen=True)
 class ModelSpec:
     provider: str
     model: str
@@ -171,6 +196,7 @@ class Settings:
     paths: Paths
     source_file: Path
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    strategy: StrategySettings = field(default_factory=StrategySettings)
 
 
 def load_settings(path: Path | None = None) -> Settings:
@@ -200,6 +226,7 @@ def parse_settings(raw: dict[str, Any], source: Path) -> Settings:
     theme = _parse_theme(raw.get("theme") or {}, errors, warnings)
     risk = _parse_risk(raw.get("risk") or {}, errors)
     llm = _parse_llm(raw.get("llm") or {}, errors, warnings)
+    strategy = parse_strategy(raw.get("strategy") or {}, risk, errors)
 
     holidays: set[dt.date] = set()
     for h in raw.get("holidays") or []:
@@ -214,7 +241,43 @@ def parse_settings(raw: dict[str, Any], source: Path) -> Settings:
 
     if errors:
         raise SettingsError("設定檔有誤：\n" + "\n".join(f"  - {e}" for e in errors))
-    return Settings(team_id, theme, risk, llm, frozenset(holidays), paths, source, tuple(warnings))
+    return Settings(team_id, theme, risk, llm, frozenset(holidays), paths, source, tuple(warnings), strategy)
+
+
+MAX_LOOKBACK = 120
+
+
+def parse_strategy(raw: dict[str, Any], risk: RiskSettings, errors: list[str]) -> StrategySettings:
+    default = StrategySettings()
+    mom_raw = raw.get("momentum", default.momentum)
+    momentum: dict[int, float] = {}
+    if not isinstance(mom_raw, dict) or not mom_raw:
+        errors.append("strategy.momentum 必須是 {交易日數: 權重} 對應表，例如 {60: 0.4, 20: 0.4, 5: 0.2}")
+    else:
+        for n, w in mom_raw.items():
+            try:
+                days = int(n)
+            except (TypeError, ValueError):
+                errors.append(f"strategy.momentum 的天數 {n!r} 不是整數")
+                continue
+            if not 1 <= days <= MAX_LOOKBACK:
+                errors.append(f"strategy.momentum 的天數 {days} 必須介於 1–{MAX_LOOKBACK}")
+            momentum[days] = _num(w, f"strategy.momentum.{n}", errors)
+        if momentum and (any(w < 0 for w in momentum.values()) or abs(sum(momentum.values()) - 1) > 1e-6):
+            errors.append("strategy.momentum 的權重必須 ≥ 0 且合計為 1")
+    strategy = StrategySettings(
+        momentum=momentum or default.momentum,
+        quality_share=_num(raw.get("quality_share", default.quality_share), "strategy.quality_share", errors),
+        anchor_top_n=int(raw.get("anchor_top_n", 0) or 0),
+        max_swaps=int(raw.get("max_swaps", default.max_swaps)),
+    )
+    if not 0 <= strategy.quality_share <= 1:
+        errors.append("strategy.quality_share 必須介於 0 與 1")
+    if not 0 <= strategy.anchor_top_n <= risk.min_holdings:
+        errors.append(f"strategy.anchor_top_n 必須介於 0 與 min_holdings（{risk.min_holdings}）")
+    if strategy.max_swaps < 1:
+        errors.append("strategy.max_swaps 至少為 1")
+    return strategy
 
 
 def _num(value: Any, name: str, errors: list[str]) -> float:

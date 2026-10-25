@@ -32,6 +32,12 @@ risk:                        # 內部風控值，比比賽規則更保守
   min_weights:               # 個股最低持有比例（0 = 不強制，完全由分數決定；> 0 時一定持有且權重不低於此值）
     "2330": 0.0
 
+strategy:                     # 選股與配置參數；python -m agent optimize 用 config/optimize_grid.yaml 回測比較
+  momentum: {60: 0.4, 20: 0.4, 5: 0.2}  # 動能 = 各天數報酬 z 分數的加權（交易日數: 權重，合計 1）
+  quality_share: 0.5          # 綜合分數中品質的比重，其餘為動能；0 = 只看動能
+  anchor_top_n: 0             # 市值前 N 大依市值比例配置，超過個股上限的部分給分數高的其他股票；0 = 不使用
+  max_swaps: 3                # 每天最多出清幾檔（控制周轉成本；首日不限）
+
 llm:
   # 每個 Agent 可以用不同模型；沒列在 agents 的用 default；default 為 null 則全部用規則版。
   # provider：openai / anthropic / google / xai / deepseek / openai_compatible（自架或其他相容服務，需 base_url）/ mock
