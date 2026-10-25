@@ -1,0 +1,15 @@
+# 環境
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 金鑰與實際設定
+.env
+config/settings.yaml
+
+# 每日資料（放在共用雲端硬碟）
+inbox/
+out/
+archive/
+cache/
