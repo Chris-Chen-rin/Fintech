@@ -35,9 +35,7 @@ def build_agents(settings: Settings) -> dict[str, list]:
         chain: list = []
         cls = LLM_AGENTS.get(step)
         if cls is not None:
-            for spec in (settings.llm.for_agent(step), settings.llm.fallback_for(step)):
-                if spec is not None:
-                    chain.append(cls(spec))
+            chain += [cls(spec) for spec in settings.llm.chain(step)]
         chain.append(RULE_AGENTS[step]())
         agents[step] = chain
     return agents

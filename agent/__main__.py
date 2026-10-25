@@ -29,20 +29,24 @@ def doctor(args: argparse.Namespace) -> int:
               "rule": f"條件 {len(theme.rules)} 條", "llm": f"分類檔 {theme.membership_file}", "none": "不考慮主題"}
     print(f"  主題：{theme.name or '（未命名）'}（模式 {theme.mode}，{detail[theme.mode]}）")
     from .agents import LLM_AGENTS
+    from .llm.budget import model_count
+
     print("  Agent 模型：")
     keys: set[str] = set()
     for name in AGENT_NAMES:
-        chain = [s for s in (settings.llm.for_agent(name), settings.llm.fallback_for(name)) if s]
+        chain = settings.llm.chain(name)
         keys |= {s.api_key_env for s in chain if s.api_key_env}
         ready = "" if not chain or name in LLM_AGENTS else "（LLM 版尚未實作，先用規則版）"
-        print(f"    {name:<18}" + " → ".join([s.label for s in chain] + ["規則版"]) + ready)
+        labels = [s.label + (f"（每日 {s.daily_limit} 次，今日已用 {model_count(settings.paths.cache, name, s)}）"
+                             if s.daily_limit is not None else "") for s in chain]
+        print(f"    {name:<18}" + " → ".join(labels + ["規則版"]) + ready)
     for key in sorted(keys):
         print(f"  金鑰 {key}：{'已找到' if get_secret(key) is not None else '找不到'}")
     if settings.llm.enabled:
         from .llm.budget import daily_count
         used = daily_count(settings.paths.cache)
-        print(f"  LLM 額度：今日（UTC）已用 {used}/{settings.llm.daily_call_limit} 次，"
-              f"每次執行最多 {settings.llm.max_calls_per_run} 次（台北時間 08:00 重置）")
+        print(f"  LLM 額度：今日已用 {used}/{settings.llm.daily_call_limit} 次，"
+              f"每次執行最多 {settings.llm.max_calls_per_run} 次（以太平洋時間換日，約台北 16:00）")
     print(f"  資料根目錄：{settings.paths.root}")
     print(f"  程式版本：{code_version()}")
     print(f"  現在（台北）：{moment:%Y-%m-%d %H:%M:%S}")

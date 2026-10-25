@@ -87,6 +87,7 @@ class ModelSpec:
     timeout: float = 120.0
     json_mode: bool = True  # 送 response_format；模型不支援時設 false，改靠提示詞要求 JSON
     extra: dict[str, Any] = field(default_factory=dict)  # 原樣併入請求，例如 seed、reasoning
+    daily_limit: int | None = None  # 這個 Agent 每天最多用這個模型幾次（稀缺模型用）；用完改用下一個備援
 
     @property
     def dplan_provider(self) -> str:
@@ -107,17 +108,24 @@ class LLMSettings:
     """每個 Agent 可指定不同模型；沒指定的用 default；都沒有就只用規則版。"""
     default: ModelSpec | None = None
     agents: dict[str, ModelSpec] = field(default_factory=dict)
-    fallback: dict[str, ModelSpec] = field(default_factory=dict)
-    max_calls_per_run: int = 20  # 一次完整執行約 6～17 次；超過就降級為規則版
-    daily_call_limit: int = 45  # OpenRouter 免費模型每天 50 次，留 5 次緩衝
+    fallback: dict[str, tuple[ModelSpec, ...]] = field(default_factory=dict)  # 依序嘗試的備援模型
+    max_calls_per_run: int = 30  # 一次完整執行約 8～15 次（研究依產業分批）；超過就降級為規則版
+    daily_call_limit: int = 150  # 所有模型合計的每日上限
 
     def for_agent(self, name: str) -> ModelSpec | None:
         spec = self.agents.get(name, self.default)
         return spec if spec and spec.provider != "mock" else None
 
+    def fallbacks_for(self, name: str) -> list[ModelSpec]:
+        return [s for s in self.fallback.get(name, ()) if s.provider != "mock"]
+
     def fallback_for(self, name: str) -> ModelSpec | None:
-        spec = self.fallback.get(name)
-        return spec if spec and spec.provider != "mock" else None
+        chain = self.fallbacks_for(name)
+        return chain[0] if chain else None
+
+    def chain(self, name: str) -> list[ModelSpec]:
+        """主模型＋備援模型（不含規則版）。"""
+        return [s for s in [self.for_agent(name), *self.fallbacks_for(name)] if s]
 
     @property
     def enabled(self) -> bool:
@@ -282,6 +290,7 @@ def _model_spec(raw: Any, where: str, errors: list[str]) -> ModelSpec | None:
         timeout=_num(raw.get("timeout", 120), f"{where}.timeout", errors),
         json_mode=bool(raw.get("json_mode", True)),
         extra=dict(raw.get("extra") or {}),
+        daily_limit=int(raw["daily_limit"]) if raw.get("daily_limit") is not None else None,
     )
     if provider not in LLM_PROVIDERS:
         errors.append(f"{where}.provider {provider!r} 不支援，可用：{' / '.join(LLM_PROVIDERS)}")
@@ -305,15 +314,20 @@ def _parse_llm(raw: dict[str, Any], errors: list[str], warnings: list[str]) -> L
     else:
         default = _model_spec(raw.get("default"), "llm.default", errors)
     agents: dict[str, ModelSpec] = {}
-    fallback: dict[str, ModelSpec] = {}
-    for section, target in (("agents", agents), ("fallback", fallback)):
+    fallback: dict[str, tuple[ModelSpec, ...]] = {}
+    for section in ("agents", "fallback"):
         for name, spec_raw in (raw.get(section) or {}).items():
             if name not in AGENT_NAMES:
                 errors.append(f"llm.{section}.{name} 不是 Agent 名稱，可用：{' / '.join(AGENT_NAMES)}")
                 continue
-            spec = _model_spec(spec_raw, f"llm.{section}.{name}", errors)
-            if spec:
-                target[name] = spec
+            if section == "agents":
+                spec = _model_spec(spec_raw, f"llm.agents.{name}", errors)
+                if spec:
+                    agents[name] = spec
+                continue
+            items = spec_raw if isinstance(spec_raw, list) else [spec_raw]
+            specs = [_model_spec(r, f"llm.fallback.{name}[{i}]", errors) for i, r in enumerate(items)]
+            fallback[name] = tuple(s for s in specs if s)
     limits = {}
     for name in ("max_calls_per_run", "daily_call_limit"):
         if name in raw:

@@ -122,3 +122,46 @@ def test_llm_call_budget(tmp_path, monkeypatch):
                                         llm=dataclasses.replace(ctx2.settings.llm, daily_call_limit=2))
     result = run_daily.execute(ctx2, dp2, CAL, write_out=False)
     assert result.ok and set(result.agents_used.values()) == {"rule"}
+
+
+def test_model_daily_limit_falls_through(tmp_path, monkeypatch):
+    """稀缺模型（daily_limit）用完時改用下一個備援模型，不中斷。"""
+    import dataclasses
+
+    from agent.agents import RULE_AGENTS
+    from agent.agents.llm_agents import LLMMarketAgent
+    from agent.framework.runner import AgentRunner
+    from agent.llm.budget import model_count
+
+    ctx, _ = build_ctx(tmp_path, first_day_datapack("TEAM_123", TRADE_DATE, "x"))
+    from agent.tools.quant import build_market_facts, build_stock_metrics
+    ctx.metrics = build_stock_metrics(ctx)
+    build_market_facts(ctx)
+    flash = ModelSpec("google", "gemini-3.8-flash", daily_limit=1)
+    lite = ModelSpec("google", "gemini-3.5-flash-lite")
+    chain = [LLMMarketAgent(flash, MockClient(flash, responder)), LLMMarketAgent(lite, MockClient(lite, responder)),
+             RULE_AGENTS["market"]()]
+    inputs = {"market_facts": ctx.facts.of("market"), "market_metrics": ctx.market_metrics, "cash_ratio": 1.0,
+              "first_day": True}
+    runner = AgentRunner(ctx)
+    runner.run("market", chain, inputs, lambda n, o: None)
+    assert runner.models["market"][1] == "gemini-3.8-flash"
+    runner.run("market2", chain, inputs, lambda n, o: None)
+    assert runner.used["market2"] == "llm" and runner.models["market2"][1] == "gemini-3.5-flash-lite"
+    assert model_count(ctx.settings.paths.cache, "market", flash) == 1
+
+
+def test_fallback_list_settings(tmp_path):
+    import yaml
+
+    from agent.settings import EXAMPLE_SETTINGS_PATH, load_settings
+
+    raw = yaml.safe_load(EXAMPLE_SETTINGS_PATH.read_text(encoding="utf-8"))
+    raw["llm"]["agents"] = {"reviewer": {"provider": "google", "model": "gemini-3.8-flash", "api_key_env": "K", "daily_limit": 3}}
+    raw["llm"]["fallback"] = {"reviewer": [{"provider": "google", "model": "gemini-3.5-flash-lite", "api_key_env": "K"},
+                                           {"provider": "google", "model": "gemma-4-31b-it", "api_key_env": "K"}]}
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    s = load_settings(p)
+    assert [m.model for m in s.llm.chain("reviewer")] == ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemma-4-31b-it"]
+    assert s.llm.chain("reviewer")[0].daily_limit == 3

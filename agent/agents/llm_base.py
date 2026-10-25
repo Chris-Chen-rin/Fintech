@@ -5,10 +5,14 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from ..framework.context import RunContext
 from ..settings import ModelSpec
+
+
+_LOCK = threading.Lock()
 
 
 class LLMAgent:
@@ -30,24 +34,36 @@ class LLMAgent:
 
     def run(self, ctx: RunContext, inputs: dict[str, Any], feedback: list[str] | None = None) -> Any:
         system, user = self.build_prompt(ctx, inputs, feedback)
-        if feedback:
-            user += "\n\n上一次的輸出未通過檢查，請修正：\n" + "\n".join(f"- {f}" for f in feedback[-8:])
         from ..llm.budget import reserve
 
-        reserve(ctx)
+        reserve(ctx, self.name, self.spec)
+        return self.parse(ctx, inputs, self.call(ctx, system, user, feedback).data)
+
+    @staticmethod
+    def with_feedback(user: str, feedback: list[str] | None) -> str:
+        if not feedback:
+            return user
+        return user + "\n\n上一次的輸出未通過檢查，請修正：\n" + "\n".join(f"- {f}" for f in feedback[-8:])
+
+    def call(self, ctx: RunContext, system: str, user: str, feedback: list[str] | None = None, tag: str = "") -> Any:
+        """呼叫一次模型並記錄（額度須先由呼叫端 reserve）；可在多執行緒中並行。"""
+        user = self.with_feedback(user, feedback)
+        name = self.name + (f"_{tag}" if tag else "")
         try:
             result = self.client.complete_json(system, user)
         except Exception as exc:
             if getattr(exc, "raw", None):
-                ctx.save(f"llm/{self.name}_failed_{ctx.usage['tool_use_count'] + 1:02d}.json",
+                ctx.save(f"llm/{name}_failed_{ctx.llm_calls:02d}.json",
                          {"model": self.spec.label, "error": str(exc), "system": system, "user": user, "response": exc.raw})
             raise
-        ctx.usage["input_tokens"] += result.input_tokens
-        ctx.usage["output_tokens"] += result.output_tokens
-        ctx.usage["tool_use_count"] += 1
+        with _LOCK:
+            ctx.usage["input_tokens"] += result.input_tokens
+            ctx.usage["output_tokens"] += result.output_tokens
+            ctx.usage["tool_use_count"] += 1
+            seq = ctx.usage["tool_use_count"]
         self.last_model = (self.spec.dplan_provider, result.model_version[:60])
-        ctx.save(f"llm/{self.name}_{ctx.usage['tool_use_count']:02d}.json",
+        ctx.save(f"llm/{name}_{seq:02d}.json",
                  {"model": self.spec.label, "reported_model": result.model_version, "system": system, "user": user,
                   "response": result.text, "input_tokens": result.input_tokens,
                   "output_tokens": result.output_tokens, "seconds": round(result.seconds, 2)})
-        return self.parse(ctx, inputs, result.data)
+        return result

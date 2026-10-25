@@ -18,7 +18,7 @@ from .llm_base import LLMAgent
 from .portfolio_manager import RulePortfolioManagerAgent
 from .research import RuleResearchAgent
 
-FOCUS = 30  # LLM 研究的檔數：規則分數前段＋現有持股＋反方退回
+FOCUS = 40  # LLM 研究的檔數：規則分數前段＋現有持股＋有重大訊息的股票
 NO_INFER = "文中提到的數字必須出自輸入的事實，不得捏造；全部用繁體中文。"
 
 
@@ -116,41 +116,87 @@ class LLMMarketAgent(LLMAgent):
 # ---------------------------------------------------------------- 研究
 
 class LLMResearchAgent(LLMAgent):
-    """量化工具先替 150 檔算好分數（規則版研究），LLM 針對前段與持股重新判斷並寫推論。"""
+    """量化工具先替 150 檔算好分數（規則版研究），LLM 依產業分批並行，針對前段、持股與有重大訊息的股票重新判斷。"""
     name = "research"
+    BATCH = 14  # 每批檔數；同產業盡量放同一批
 
-    def build_prompt(self, ctx: RunContext, inputs: dict[str, Any], feedback: list[str] | None) -> tuple[str, str]:
+    def _prepare(self, ctx: RunContext, inputs: dict[str, Any]) -> list[list[str]]:
+        from ..theme import universe_industries
+
         weak = list(inputs.get("weak") or [])
         prev = inputs.get("previous")
-        base = prev if (weak and prev) else RuleResearchAgent().run(ctx, inputs, None)
+        self._retry = bool(weak and prev)
+        base = prev if self._retry else RuleResearchAgent().run(ctx, inputs, None)
         self._base = {t.tickers[0]: t for t in base if t.tickers}
+        self._weak = set(weak)
         ranked = sorted(self._base, key=lambda c: -(self._base[c].score or -9))
-        focus = weak if (weak and prev) else list(dict.fromkeys(ranked[:FOCUS] + sorted(ctx.held & set(self._base))))
+        if self._retry:
+            focus = [c for c in weak if c in self._base]
+        else:
+            news = [c for c in ranked[:80] if any(f.topic == "intel" for f in ctx.facts.of(c))]
+            focus = list(dict.fromkeys(ranked[:FOCUS] + sorted(ctx.held & set(self._base)) + news))
         self._focus = focus
         self._allowed = {c: set(self._base[c].premises) | {f.key for f in ctx.facts.of(c)} for c in focus}
-        theme = ctx.theme.members if ctx.theme and ctx.theme.active else set()
-        system = (
+        industry = universe_industries()
+        ordered = sorted(focus, key=lambda c: (industry.get(c, ""), c))
+        n = max(1, -(-len(ordered) // self.BATCH))
+        size = -(-len(ordered) // n)
+        return [ordered[i:i + size] for i in range(0, len(ordered), size)]
+
+    def _system(self, ctx: RunContext) -> str:
+        return (
             "你是台股主動式 ETF 的個股研究員。"
             f"ETF 主題：{ctx.settings.theme.name}。{ctx.settings.theme.description}\n"
-            "每檔股票附上量化工具算好的優質動能分數（品質與動能各半，z 分數）與相關事實。"
+            "每檔股票附上量化工具算好的優質動能分數（品質與動能各半，z 分數）與相關事實（價量、財報、重大訊息）。"
             "請逐檔判斷 view（positive／neutral／negative）與 score（-3～3，可參考量化分數但要有自己的判斷，"
-            "例如重大訊息、評價過高、短線過熱、獲利轉弱都可調整），"
+            "例如評價過高、短線過熱、獲利轉弱都可調整）；有重大訊息的股票必須評估該訊息的影響並引用它。"
             "logic 60–350 字，必須引用該股事實代號（寫成 {F12} 這種格式），說明判斷依據；"
             "conclusion 40 字內；counter_evidence 寫反方訊號（沒有就 null）。"
             + NO_INFER +
             '\n輸出 JSON：{"theses":[{"ticker":"2330","view":"positive","score":1.2,"premises":["F12"],'
             '"logic":"…","conclusion":"…","counter_evidence":"…"}]}，每檔都要輸出。'
         )
+
+    def _user(self, ctx: RunContext, codes: list[str]) -> str:
+        theme = ctx.theme.members if ctx.theme and ctx.theme.active else set()
         blocks = []
-        for c in focus:
+        for c in codes:
             t = self._base[c]
             facts = "\n".join(_fact_line(ctx, k) for k in sorted(self._allowed[c], key=lambda k: int(k[1:])))
             tag = "主題核心池" if c in theme else ("非核心池（衛星）" if theme else "")
             blocks.append(f"■ {ctx.name(c)} {tag} 量化分數 {t.score:+.2f}"
-                          + (f"（反方審查意見：{t.counter_evidence}）" if c in weak and t.counter_evidence else "")
+                          + (f"（反方審查意見：{t.counter_evidence}）" if c in self._weak and t.counter_evidence else "")
                           + f"\n{facts}")
-        user = f"交易日 {ctx.window.trade_date}，共 {len(focus)} 檔：\n\n" + "\n\n".join(blocks)
-        return system, user
+        return f"交易日 {ctx.window.trade_date}，共 {len(codes)} 檔：\n\n" + "\n\n".join(blocks)
+
+    def build_prompt(self, ctx: RunContext, inputs: dict[str, Any], feedback: list[str] | None) -> tuple[str, str]:
+        self._prepare(ctx, inputs)
+        return self._system(ctx), self._user(ctx, self._focus)
+
+    def run(self, ctx: RunContext, inputs: dict[str, Any], feedback: list[str] | None = None) -> list[Thesis]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        from ..llm.budget import reserve
+
+        batches = self._prepare(ctx, inputs)
+        system = self._system(ctx)
+        for _ in batches:
+            reserve(ctx, self.name, self.spec)  # 先在主執行緒佔好額度，額度不足就整批不呼叫
+        items: list[Any] = []
+        errors: list[str] = []
+        with ThreadPoolExecutor(max_workers=len(batches)) as pool:
+            futures = [pool.submit(self.call, ctx, system, self._user(ctx, b), feedback, f"b{i + 1}")
+                       for i, b in enumerate(batches)]
+            for i, fut in enumerate(futures):
+                try:
+                    data = fut.result().data
+                    got = data.get("theses") if isinstance(data, dict) else None
+                    items += got if isinstance(got, list) else []
+                except Exception as exc:  # noqa: BLE001 - 單批失敗時其他批照用，最後看合格檔數
+                    errors.append(f"第 {i + 1} 批（{len(batches[i])} 檔）失敗：{exc}")
+        if errors:
+            ctx.log("  ⚠ 研究 " + "；".join(e[:150] for e in errors))
+        return self.parse(ctx, inputs, {"theses": items})
 
     def parse(self, ctx: RunContext, inputs: dict[str, Any], data: Any) -> list[Thesis]:
         items = data.get("theses") if isinstance(data, dict) else None
@@ -180,7 +226,7 @@ class LLMResearchAgent(LLMAgent):
             done.add(c)
         if len(done) < max(1, len(self._focus) * 0.6):
             raise LLMError(f"只有 {len(done)}/{len(self._focus)} 檔輸出合格，請每檔都輸出完整欄位並引用該股事實代號")
-        if not (inputs.get("weak") and inputs.get("previous")):
+        if not self._retry:
             # 不在研究範圍的股票保留量化分數，但看法降為中性：今天的買進只來自 LLM 研究過的股票
             for c, t in out.items():
                 if c not in done and t.view == "positive":

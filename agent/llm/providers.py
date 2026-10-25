@@ -100,16 +100,21 @@ class GeminiClient:
             "systemInstruction": {"parts": [{"text": system + JSON_INSTRUCTION}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             "generationConfig": {"temperature": self.spec.temperature, "maxOutputTokens": self.spec.max_output_tokens,
-                                 "responseMimeType": "application/json"},
+                                 "responseMimeType": "application/json", **self.spec.extra},
         }
         started = time.monotonic()
         data = post_json(url, {"x-goog-api-key": _key(self.spec)}, body, self.spec.timeout)
         try:
-            text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+            text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"] if not p.get("thought"))
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"回應格式不符（可能被安全機制擋下）：{str(data)[:300]}") from exc
         usage = data.get("usageMetadata") or {}
-        return LLMResult(parse_json_text(text), text, int(usage.get("promptTokenCount") or 0),
+        try:
+            parsed = parse_json_text(text)
+        except LLMError as exc:
+            exc.raw = text or str(data)[:2000]
+            raise
+        return LLMResult(parsed, text, int(usage.get("promptTokenCount") or 0),
                          int(usage.get("candidatesTokenCount") or 0), str(data.get("modelVersion") or self.spec.model),
                          time.monotonic() - started)
 
