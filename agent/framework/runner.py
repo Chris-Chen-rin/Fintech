@@ -24,6 +24,7 @@ class AgentRunner:
         self.ctx = ctx
         self.seq = 0
         self.used: dict[str, str] = {}
+        self.models: dict[str, tuple[str, str]] = {}  # 步驟 → (D-Plan 供應商, 模型版本)
 
     def run(self, step: str, agents: list[Agent], inputs: dict[str, Any],
             validate: Callable[[str, Any], None], feedback: list[str] | None = None,
@@ -51,5 +52,7 @@ class AgentRunner:
                     record["seconds"] = round(time.monotonic() - started, 3)
                     self.ctx.save(f"agents/{self.seq:02d}_{step}_{agent.variant}.json", record | {"output": output})
                 self.used[step] = agent.variant
+                if agent.variant == "llm":
+                    self.models[step] = agent.last_model
                 return output
         raise AgentFailure(f"{step} 的所有 Agent 版本都失敗：" + "；".join(notes[-3:]))

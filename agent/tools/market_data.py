@@ -244,7 +244,7 @@ class MarketHistory:
         return self.days[market].get(day)
 
 
-def load_history(store: PriceStore, end: dt.date, n_days: int, is_weekday_open, max_lookback: int = 80) -> MarketHistory:
+def load_history(store: PriceStore, end: dt.date, n_days: int, is_weekday_open, max_lookback: int = 140) -> MarketHistory:
     """從 end（前一交易日）往前收集 n_days 個有行情的交易日。end 當天沒有行情就報錯。"""
     dates: list[dt.date] = []
     days: dict[str, dict[dt.date, DayQuotes]] = {"twse": {}, "tpex": {}}

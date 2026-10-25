@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -12,7 +13,6 @@ from typing import Any
 import yaml
 
 from dplan_checker import rules as R
-from dplan_checker.loaders import load_universe
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.yaml"
@@ -24,11 +24,36 @@ class SettingsError(Exception):
     """設定檔缺漏或違反比賽規則。"""
 
 
+THEME_MODES = ("tickers", "industries", "rule", "llm", "none")
+THEME_RULE_METRICS = ("ret_5d", "ret_20d", "ret_60d", "chg_pct", "avg_value", "volatility", "close",
+                      "market_cap", "market_cap_rank", "ni_ttm", "eps_ttm", "eps_growth", "roe", "pe", "pb",
+                      "rev_yoy", "rev_cum_yoy", "cash_conversion", "dividend_yield")
+AGENT_NAMES = ("intel", "market", "research", "reviewer", "portfolio_manager")
+LLM_PROVIDERS = ("openai", "anthropic", "google", "xai", "deepseek", "openrouter", "openai_compatible", "mock")
+DPLAN_PROVIDERS = ("anthropic", "openai", "google", "xai", "deepseek", "alibaba", "meta", "mistral", "cohere",
+                   "amazon", "microsoft", "nvidia", "taide", "other")
+
+
+@dataclass(frozen=True)
+class ThemeRule:
+    """數值條件；held_* 是已持有時的退出門檻（比進入門檻寬鬆，避免成員天天進出）。"""
+    metric: str
+    min: float | None = None
+    max: float | None = None
+    held_min: float | None = None
+    held_max: float | None = None
+
+
 @dataclass(frozen=True)
 class ThemeSettings:
     name: str
     tickers: tuple[str, ...]
     min_weight: float
+    mode: str = "none"
+    description: str = ""
+    industries: tuple[str, ...] = ()
+    rules: tuple[ThemeRule, ...] = ()
+    membership_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -46,10 +71,50 @@ class RiskSettings:
 
 
 @dataclass(frozen=True)
-class LLMSettings:
+class ModelSpec:
     provider: str
     model: str
-    api_key_env: str
+    api_key_env: str = ""
+    base_url: str | None = None
+    report_as: str | None = None  # D-Plan model_provider；openai_compatible（自架、其他廠商）必填
+    temperature: float = 0.0
+    max_output_tokens: int = 4096
+    timeout: float = 120.0
+    json_mode: bool = True  # 送 response_format；模型不支援時設 false，改靠提示詞要求 JSON
+    extra: dict[str, Any] = field(default_factory=dict)  # 原樣併入請求，例如 seed、reasoning
+
+    @property
+    def dplan_provider(self) -> str:
+        if self.report_as:
+            return self.report_as
+        if self.provider in DPLAN_PROVIDERS:
+            return self.provider
+        vendor = self.model.split("/", 1)[0] if "/" in self.model else ""  # OpenRouter 的模型代號是「廠商/模型」
+        return vendor if vendor in DPLAN_PROVIDERS else "other"
+
+    @property
+    def label(self) -> str:
+        return f"{self.provider}:{self.model}"
+
+
+@dataclass(frozen=True)
+class LLMSettings:
+    """每個 Agent 可指定不同模型；沒指定的用 default；都沒有就只用規則版。"""
+    default: ModelSpec | None = None
+    agents: dict[str, ModelSpec] = field(default_factory=dict)
+    fallback: dict[str, ModelSpec] = field(default_factory=dict)
+
+    def for_agent(self, name: str) -> ModelSpec | None:
+        spec = self.agents.get(name, self.default)
+        return spec if spec and spec.provider != "mock" else None
+
+    def fallback_for(self, name: str) -> ModelSpec | None:
+        spec = self.fallback.get(name)
+        return spec if spec and spec.provider != "mock" else None
+
+    @property
+    def enabled(self) -> bool:
+        return any(self.for_agent(a) for a in AGENT_NAMES)
 
 
 @dataclass(frozen=True)
@@ -116,29 +181,9 @@ def parse_settings(raw: dict[str, Any], source: Path) -> Settings:
     elif team_id == "TEAM_000":
         warnings.append("team_id 仍是範本值 TEAM_000，請改成主辦方配發的代號")
 
-    theme_raw = raw.get("theme") or {}
-    tickers = tuple(str(t) for t in theme_raw.get("tickers") or [])
-    theme = ThemeSettings(str(theme_raw.get("name") or ""), tickers, _num(theme_raw.get("min_weight", 0.0), "theme.min_weight", errors))
-    universe = load_universe(R.DEFAULT_UNIVERSE)
-    outside = [t for t in tickers if t not in universe]
-    if outside:
-        errors.append(f"theme.tickers 有不在 150 檔清單內的代號：{', '.join(outside)}")
-    dup = sorted({t for t in tickers if tickers.count(t) > 1})
-    if dup:
-        warnings.append(f"theme.tickers 有重複代號：{', '.join(dup)}")
-    if not tickers:
-        warnings.append("尚未設定主題標的（theme.tickers）；首日建倉前必須填好")
-    if not 0 <= theme.min_weight <= 1:
-        errors.append("theme.min_weight 必須介於 0 與 1 之間")
-
+    theme = _parse_theme(raw.get("theme") or {}, errors, warnings)
     risk = _parse_risk(raw.get("risk") or {}, errors)
-
-    llm_raw = raw.get("llm") or {}
-    llm = LLMSettings(str(llm_raw.get("provider") or "mock"), str(llm_raw.get("model") or ""), str(llm_raw.get("api_key_env") or ""))
-    if llm.provider == "mock":
-        warnings.append("LLM 尚未設定（provider=mock），推論文字會使用模板")
-    elif not llm.model:
-        errors.append(f"llm.provider 為 {llm.provider} 時必須填 llm.model")
+    llm = _parse_llm(raw.get("llm") or {}, errors, warnings)
 
     holidays: set[dt.date] = set()
     for h in raw.get("holidays") or []:
@@ -162,6 +207,109 @@ def _num(value: Any, name: str, errors: list[str]) -> float:
     except (TypeError, ValueError):
         errors.append(f"{name} 必須是數字，目前是 {value!r}")
         return 0.0
+
+
+def _parse_theme(raw: dict[str, Any], errors: list[str], warnings: list[str]) -> ThemeSettings:
+    tickers = tuple(str(t) for t in raw.get("tickers") or [])
+    industries = tuple(str(i) for i in raw.get("industries") or [])
+    mode = str(raw.get("mode") or ("tickers" if tickers else "none"))
+    min_weight = _num(raw.get("min_weight", 0.0), "theme.min_weight", errors)
+    if mode not in THEME_MODES:
+        errors.append(f"theme.mode {mode!r} 不合法，可用：{' / '.join(THEME_MODES)}")
+    if not 0 <= min_weight <= 1:
+        errors.append("theme.min_weight 必須介於 0 與 1 之間")
+
+    universe = json.loads(R.DEFAULT_UNIVERSE.read_text(encoding="utf-8"))["stocks"]
+    codes = {s["code"] for s in universe}
+    known_industries = {s.get("industry") for s in universe}
+    outside = [t for t in tickers if t not in codes]
+    if outside:
+        errors.append(f"theme.tickers 有不在 150 檔清單內的代號：{', '.join(outside)}")
+    dup = sorted({t for t in tickers if tickers.count(t) > 1})
+    if dup:
+        warnings.append(f"theme.tickers 有重複代號：{', '.join(dup)}")
+    unknown = [i for i in industries if i not in known_industries]
+    if unknown:
+        errors.append(f"theme.industries 有 150 檔中不存在的產業：{', '.join(unknown)}（產業名稱見 universe_150.json 的 industry）")
+
+    rules: list[ThemeRule] = []
+    for i, r in enumerate(raw.get("rules") or []):
+        if not isinstance(r, dict) or r.get("metric") not in THEME_RULE_METRICS:
+            errors.append(f"theme.rules[{i}] 的 metric 必須是 {' / '.join(THEME_RULE_METRICS)} 之一")
+            continue
+        vals = {k: (None if r.get(k) is None else _num(r.get(k), f"theme.rules[{i}].{k}", errors))
+                for k in ("min", "max", "held_min", "held_max")}
+        if vals["min"] is None and vals["max"] is None:
+            errors.append(f"theme.rules[{i}] 至少要有 min 或 max")
+        rules.append(ThemeRule(r["metric"], **vals))
+
+    file_raw = raw.get("membership_file")
+    membership_file = (PROJECT_ROOT / file_raw) if file_raw else None
+    if mode == "tickers" and not tickers:
+        warnings.append("theme.mode 為 tickers 但尚未填 theme.tickers")
+    elif mode == "industries" and not industries:
+        errors.append("theme.mode 為 industries 時必須填 theme.industries")
+    elif mode == "rule" and not rules:
+        errors.append("theme.mode 為 rule 時必須填 theme.rules")
+    elif mode == "llm" and not (membership_file and membership_file.exists()):
+        warnings.append("theme.mode 為 llm，但主題分類檔（theme.membership_file）不存在；本次視同沒有主題成員")
+    elif mode == "none":
+        warnings.append("尚未設定主題（theme.mode = none）：選股不考慮主題，主題占比檢查略過")
+    return ThemeSettings(str(raw.get("name") or ""), tickers, min_weight, mode, str(raw.get("description") or ""),
+                         industries, tuple(rules), membership_file)
+
+
+def _model_spec(raw: Any, where: str, errors: list[str]) -> ModelSpec | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        errors.append(f"{where} 必須是 {{provider, model, api_key_env}} 對應表")
+        return None
+    provider = str(raw.get("provider") or "mock")
+    spec = ModelSpec(
+        provider=provider, model=str(raw.get("model") or ""), api_key_env=str(raw.get("api_key_env") or ""),
+        base_url=raw.get("base_url"), report_as=raw.get("report_as"),
+        temperature=_num(raw.get("temperature", 0.0), f"{where}.temperature", errors),
+        max_output_tokens=int(raw.get("max_output_tokens", 4096)),
+        timeout=_num(raw.get("timeout", 120), f"{where}.timeout", errors),
+        json_mode=bool(raw.get("json_mode", True)),
+        extra=dict(raw.get("extra") or {}),
+    )
+    if provider not in LLM_PROVIDERS:
+        errors.append(f"{where}.provider {provider!r} 不支援，可用：{' / '.join(LLM_PROVIDERS)}")
+    elif provider != "mock":
+        if not spec.model:
+            errors.append(f"{where}.provider 為 {provider} 時必須填 model")
+        if not spec.api_key_env and provider != "openai_compatible":
+            errors.append(f"{where} 必須填 api_key_env（金鑰所在的環境變數或 Colab Secret 名稱）")
+        if provider == "openai_compatible" and not spec.base_url:
+            errors.append(f"{where}.provider 為 openai_compatible 時必須填 base_url")
+        if spec.report_as is not None and spec.report_as not in DPLAN_PROVIDERS:
+            errors.append(f"{where}.report_as 必須是 D-Plan 允許的供應商：{' / '.join(DPLAN_PROVIDERS)}")
+        if len(spec.model) > 60:
+            errors.append(f"{where}.model 超過 60 字，無法填入 D-Plan 的 model_version")
+    return spec
+
+
+def _parse_llm(raw: dict[str, Any], errors: list[str], warnings: list[str]) -> LLMSettings:
+    if "provider" in raw:  # 舊格式：llm 底下直接寫 provider / model / api_key_env
+        default = _model_spec(raw, "llm", errors)
+    else:
+        default = _model_spec(raw.get("default"), "llm.default", errors)
+    agents: dict[str, ModelSpec] = {}
+    fallback: dict[str, ModelSpec] = {}
+    for section, target in (("agents", agents), ("fallback", fallback)):
+        for name, spec_raw in (raw.get(section) or {}).items():
+            if name not in AGENT_NAMES:
+                errors.append(f"llm.{section}.{name} 不是 Agent 名稱，可用：{' / '.join(AGENT_NAMES)}")
+                continue
+            spec = _model_spec(spec_raw, f"llm.{section}.{name}", errors)
+            if spec:
+                target[name] = spec
+    llm = LLMSettings(default, agents, fallback)
+    if not llm.enabled:
+        warnings.append("LLM 尚未設定：五個 Agent 都使用規則版")
+    return llm
 
 
 def _parse_risk(raw: dict[str, Any], errors: list[str]) -> RiskSettings:

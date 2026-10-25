@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import gzip
 import hashlib
+import http.client
 import json
 import time
 import urllib.error
@@ -16,7 +17,7 @@ from urllib.parse import urlparse
 from ..trading_calendar import iso_tpe, now_tpe
 
 USER_AGENT = "Mozilla/5.0 (compatible; esun-agent-fund-manager/1.0)"
-MIN_INTERVAL = {"www.twse.com.tw": 3.0, "www.tpex.org.tw": 1.0}
+MIN_INTERVAL = {"www.twse.com.tw": 3.0, "www.tpex.org.tw": 1.0, "mopsov.twse.com.tw": 3.0, "openapi.twse.com.tw": 1.0}
 
 
 class FetchError(Exception):
@@ -41,16 +42,31 @@ class HttpClient:
         self._last_hit: dict[str, float] = {}
         self.request_count = 0
 
-    def _paths(self, url: str) -> tuple[Path, Path]:
-        key = hashlib.sha256(url.encode()).hexdigest()[:24]
+    def _paths(self, url: str, tag: str = "") -> tuple[Path, Path]:
+        key = hashlib.sha256((url + ("#" + tag if tag else "")).encode()).hexdigest()[:24]
         return self.raw_dir / f"{key}.body.gz", self.raw_dir / f"{key}.meta.json"
 
-    def get_json(self, url: str, refresh: bool = False) -> Fetched:
-        """取得 JSON。快取存在且 refresh=False 時直接用快取（歷史資料不會變）。"""
-        body_path, meta_path = self._paths(url)
+    def get_json(self, url: str, refresh: bool = False, tag: str = "") -> Fetched:
+        """取得 JSON。快取存在且 refresh=False 時直接用快取（歷史資料不會變）。
+
+        tag：只提供「最新一期」的資料集用日期當 tag，每天各存一份，重跑同一天時讀到同一份內容。
+        """
+        f = self._get(url, refresh, tag, "application/json")
+        try:
+            return Fetched(url, json.loads(f.data.decode("utf-8-sig")), f.fetched_at, f.snapshot, f.from_cache)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self.forget(url, tag)
+            raise FetchError(f"{url} 回傳的不是 JSON（可能被限速或網站維護）") from exc
+
+    def get_text(self, url: str, refresh: bool = False, tag: str = "", encoding: str = "utf-8") -> Fetched:
+        f = self._get(url, refresh, tag, "text/html")
+        return Fetched(url, f.data.decode(encoding, "replace"), f.fetched_at, f.snapshot, f.from_cache)
+
+    def _get(self, url: str, refresh: bool, tag: str, accept: str) -> Fetched:
+        body_path, meta_path = self._paths(url, tag)
         if body_path.exists() and meta_path.exists() and not refresh:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            return Fetched(url, json.loads(gzip.decompress(body_path.read_bytes())), meta["fetched_at"], body_path, True)
+            return Fetched(url, gzip.decompress(body_path.read_bytes()), meta["fetched_at"], body_path, True)
         if self.offline:
             raise FetchError(f"離線模式且沒有快取：{url}")
 
@@ -58,14 +74,14 @@ class HttpClient:
         wait = MIN_INTERVAL.get(host, 0.0) - (time.monotonic() - self._last_hit.get(host, -1e9))
         if wait > 0:
             time.sleep(wait)
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
         body = b""
         for attempt in range(3):
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     body = resp.read()
                 break
-            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
                 if attempt == 2:
                     raise FetchError(f"無法連線 {url}：{exc}") from exc
                 time.sleep(2 * (attempt + 1))
@@ -73,16 +89,13 @@ class HttpClient:
                 self._last_hit[host] = time.monotonic()
         self.request_count += 1
         fetched_at = iso_tpe(now_tpe())
-        try:
-            data = json.loads(body.decode("utf-8-sig"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise FetchError(f"{url} 回傳的不是 JSON（可能被限速或網站維護）") from exc
         body_path.write_bytes(gzip.compress(body))
-        meta_path.write_text(json.dumps({"url": url, "fetched_at": fetched_at, "bytes": len(body)}, ensure_ascii=False), encoding="utf-8")
-        return Fetched(url, data, fetched_at, body_path, False)
+        meta_path.write_text(json.dumps({"url": url, "tag": tag, "fetched_at": fetched_at, "bytes": len(body)},
+                                        ensure_ascii=False), encoding="utf-8")
+        return Fetched(url, body, fetched_at, body_path, False)
 
-    def forget(self, url: str) -> None:
-        for p in self._paths(url):
+    def forget(self, url: str, tag: str = "") -> None:
+        for p in self._paths(url, tag):
             p.unlink(missing_ok=True)
 
 

@@ -5,8 +5,21 @@ team_id: TEAM_000            # 主辦方配發的隊伍代號
 
 theme:
   name: ""                   # ETF 主題名稱，與「ETF 投資策略說明文件」一致
-  tickers: []                # 主題標的代號（必須在 150 檔清單內），例如 ["2330", "2454"]
-  min_weight: 0.0            # 主題標的占淨值的下限，例如 0.6
+  description: ""            # 主題描述（llm 模式分類時使用）
+  mode: none                 # 主題成員的決定方式：
+                             #   tickers    固定代號清單（填 tickers）
+                             #   industries 依產業別（填 industries，名稱見 universe_150.json 的 industry，例如 半導體業、金融保險業）
+                             #   rule       依量化條件（填 rules）
+                             #   llm        賽前由 LLM 依 description 分類、存成檔案，賽中固定（填 membership_file）
+                             #   none       不考慮主題（主題占比檢查略過）
+  min_weight: 0.0            # 主題成員占淨值的下限，例如 0.6；mode 為 none 時無作用
+  tickers: []                # 例如 ["2330", "2454"]
+  industries: []             # 例如 ["半導體業", "電子零組件業"]
+  rules: []                  # 例如：
+                             #   - {metric: avg_value, min: 1.0e9}                      # 20 日均成交值 ≥ 10 億
+                             #   - {metric: ret_20d, min: 5, held_min: 0}               # 進入要 ≥ 5%，已持有跌破 0% 才退出
+                             # metric 可用 ret_5d / ret_20d / chg_pct（%）、avg_value（元）、volatility、close
+  membership_file: null      # 例如 config/theme_membership.json，內容 {"scores": {"2330": {"score": 0.9, "reason": "…"}}}
 
 risk:                        # 內部風控值，比比賽規則更保守
   min_holdings: 22           # 規則 20–30 檔
@@ -18,9 +31,22 @@ risk:                        # 內部風控值，比比賽規則更保守
   no_trade_band: 0.015       # 權重偏離小於此值就不調整
 
 llm:
-  provider: mock             # 待定：mock / google / openai / anthropic …
-  model: ""
-  api_key_env: ""            # 金鑰所在的環境變數或 Colab Secret 名稱，例如 GEMINI_API_KEY
+  # 每個 Agent 可以用不同模型；沒列在 agents 的用 default；default 為 null 則全部用規則版。
+  # provider：openai / anthropic / google / xai / deepseek / openai_compatible（自架或其他相容服務，需 base_url）/ mock
+  # 每個 Agent 最後一定有規則版備援；fallback 可再多指定一個備援模型。
+  # 多家供應商混用時，D-Plan 的 model_provider 會填 other，model_version 列出各 Agent 的模型（完整對照存在 archive 的 models.json）。
+  default: null
+  #   provider: google
+  #   model: gemini-2.5-flash
+  #   api_key_env: GEMINI_API_KEY      # 金鑰所在的環境變數或 Colab Secret 名稱
+  agents: {}
+  #   portfolio_manager: {provider: anthropic, model: claude-sonnet-4-5, api_key_env: ANTHROPIC_API_KEY}
+  #   market:            {provider: openai, model: gpt-5-mini, api_key_env: OPENAI_API_KEY}
+  #   research:          {provider: google, model: gemini-2.5-flash, api_key_env: GEMINI_API_KEY}
+  #   reviewer:          {provider: xai, model: grok-4-fast, api_key_env: XAI_API_KEY}
+  #   intel:             {provider: openai_compatible, model: my-model, base_url: "http://localhost:8000/v1", report_as: other}
+  fallback: {}
+  #   portfolio_manager: {provider: google, model: gemini-2.5-flash, api_key_env: GEMINI_API_KEY}
 
 holidays: ["2026-10-23", "2026-10-26"]   # 休市日；10/23 會影響首日的「前一交易日」（應為 10/22）
 

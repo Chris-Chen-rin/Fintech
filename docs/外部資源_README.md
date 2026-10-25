@@ -54,7 +54,6 @@ D-Plan 的 `authority` 欄位要依來源填寫，下表一併列出。
 | 上櫃月營收 | `https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap05_O` | mops | 已確認 | 欄位同上市月營收 |
 | 上櫃三大法人 | `https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading` | tpex | 待確認 | API 文件中有此端點，尚未看過資料 |
 | 上櫃指數 | `https://www.tpex.org.tw/openapi/v1/tpex_index` | tpex | 待確認 | 同上 |
-| 上櫃本益比、殖利率 | 櫃買中心 OpenAPI | tpex | 待確認 | 尚未找到對應端點 |
 | 期貨每日行情（含台指期） | `https://openapi.taifex.com.tw/v1/DailyMarketReportFut` | taifex | 待確認 | API 文件已確認存在；是否含夜盤需實測 |
 | 期貨法人未平倉 | `https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate` | taifex | 待確認 | |
 | 匯率 | `https://openapi.taifex.com.tw/v1/DailyForeignExchangeRates` | taifex | 待確認 | |
@@ -62,7 +61,12 @@ D-Plan 的 `authority` 欄位要依來源填寫，下表一併列出。
 | 台股新聞 | `https://api.cnyes.com/media/api/v1/newslist/category/tw_stock?limit=30` | media | 已確認 | 非官方介面；欄位 `newsId`、`title`、`publishAt`（Unix 時間）；**必須附 `archive_url`** |
 | 網頁存檔查詢 | `https://archive.org/wayback/available?url=網址` | — | 已確認 | 查詢既有存檔 |
 | 網頁存檔建立 | `https://web.archive.org/save/網址` | — | 待確認 | 有頻率限制 |
-| 第三季財報 | 公開資訊觀測站 | mops | 待確認 | 11/14 前公布，成長主題需要 |
+| 綜合損益表彙總（累計至該季） | `https://mopsov.twse.com.tw/mops/web/ajax_t163sb04?encodeURIComponent=1&step=1&firstin=1&off=1&isQuery=Y&TYPEK=sii&year=115&season=02` | mops | 已使用 | HTML；`TYPEK` sii 上市／otc 上櫃；依產業格式分多個表；含 `基本每股盈餘（元）`、`淨利（淨損）歸屬於母公司業主`（千元）。`mops.twse.com.tw` 會擋，要用 `mopsov` |
+| 現金流量表彙總（累計至該季） | 同上，`ajax_t163sb20` | mops | 已使用 | `營業活動之淨現金流入（流出）` |
+| 月營收統計表 | `https://mopsov.twse.com.tw/nas/t21/sii/t21sc03_115_9_0.html` | mops | 已使用 | cp950 編碼；`sii`／`otc`、民國年、月、`0` 本國／`1` 外國企業；次月 10 日前公告 |
+| 上櫃本益比、殖利率、股價淨值比 | `https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis` | tpex | 已使用 | 欄位 `PriceEarningRatio`、`PriceBookRatio`、`YieldRatio` |
+| 公司基本資料（實收資本額、面額） | `https://openapi.twse.com.tw/v1/opendata/t187ap03_L`、`https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O` | — | 已使用 | 只用來算發行股數與市值排名，不寫進事實 |
+| 第三季財報 | 同綜合損益表彙總（`season=03`） | mops | 已接上 | 11/14 前陸續公布；每家公司各自取最新一季，申報期間每天重抓 |
 | 主動型 ETF 每日持股 | 各投信官網的持股揭露 | fininst | 待確認 | 沒有統一 API，需逐家調查；主動投資比率監控需要 |
 
 ### 3.3 使用注意

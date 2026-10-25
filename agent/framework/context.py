@@ -65,6 +65,8 @@ class RunContext:
     started_at: dt.datetime
     clock_offset: dt.timedelta = dt.timedelta(0)
     metrics: dict[str, Any] = field(default_factory=dict)
+    theme: Any = None  # ThemeMembership
+    fundamentals: dict[str, Any] = field(default_factory=dict)  # 代號 → Fundamentals
     market_metrics: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, int] = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0, "tool_use_count": 0})
     log_lines: list[str] = field(default_factory=list)

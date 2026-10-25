@@ -40,7 +40,8 @@ class GateResult:
 
 
 def check_plan(plan: PortfolioPlan, mv: MarketView, datapack: DataPack, prices: dict[str, float],
-               settings: Settings, trade_date_streaks: dict[str, int] | None = None) -> GateResult:
+               settings: Settings, trade_date_streaks: dict[str, int] | None = None,
+               theme_members: set[str] | None = None) -> GateResult:
     book, nav = datapack.book, datapack.book.nav
     risk = settings.risk
     v: list[Violation] = []
@@ -140,7 +141,7 @@ def check_plan(plan: PortfolioPlan, mv: MarketView, datapack: DataPack, prices: 
         if simulate_orders(book, buys_only, prices).cash_ratio_gross < lo:
             warn("FUNDING_UNTAGGED", "不賣出的話現金會低於宣告下限；資金調度賣出應標記 funding_for")
 
-    theme = set(settings.theme.tickers)
+    theme = theme_members or set()
     theme_weight = sum(sim.weight(c) for c, s in sim.shares_after.items() if s > 0 and c in theme)
     if theme and theme_weight < settings.theme.min_weight:
         warn("THEME_WEIGHT_LOW", f"主題標的占淨值 {theme_weight:.1%}，低於下限 {settings.theme.min_weight:.0%}")

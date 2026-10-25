@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass
+from typing import Any
 
 from ..framework.context import RunContext
 
@@ -23,7 +24,10 @@ class StockMetrics:
     ret_20d: float | None
     avg_value: float | None  # 近 20 日平均成交值（元）
     volatility: float | None  # 近 20 日日報酬標準差
+    ret_60d: float | None = None
     fact: str | None = None
+    fund: Any = None  # Fundamentals
+    fund_fact: str | None = None
 
 
 def pct(x: float) -> str:
@@ -89,7 +93,7 @@ def build_market_facts(ctx: RunContext) -> list[str]:
 
 def build_stock_metrics(ctx: RunContext) -> dict[str, StockMetrics]:
     h = ctx.history
-    last, d5, d20 = h.last, h.ago(5), h.ago(20)
+    last, d5, d20, d60 = h.last, h.ago(5), h.ago(20), h.ago(60)
     out: dict[str, StockMetrics] = {}
     window = h.dates[-21:]
     for code, name in ctx.universe.items():
@@ -107,6 +111,8 @@ def build_stock_metrics(ctx: RunContext) -> dict[str, StockMetrics]:
             ret_20d=_ret(q.close, h.close(code, d20)) if d20 else None,
             avg_value=statistics.fmean(v.value for v in values) if values else None,
             volatility=statistics.pstdev(rets) if len(rets) >= 5 else None,
+            ret_60d=_ret(q.close, h.close(code, d60)) if d60 else None,
+            fund=ctx.fundamentals.get(code),
         )
     return out
 
@@ -114,7 +120,7 @@ def build_stock_metrics(ctx: RunContext) -> dict[str, StockMetrics]:
 def build_stock_facts(ctx: RunContext) -> None:
     """每檔標的一筆價量事實；只有被推論引用的才會出現在 D-Plan。"""
     h, reg = ctx.history, ctx.registry
-    last, d5, d20 = h.last, h.ago(5), h.ago(20)
+    last, d5, d20, d60 = h.last, h.ago(5), h.ago(20), h.ago(60)
     for code, m in ctx.metrics.items():
         srcs = [reg.add_day_quotes(h.day_quotes(m.market, last))]
         text = f"{code} {m.name} {last:%m/%d} 收盤 {price_text(m.close)} 元"
@@ -122,7 +128,7 @@ def build_stock_facts(ctx: RunContext) -> None:
         if m.chg_pct is not None:
             text += f"，當日 {pct(m.chg_pct)}"
             values["chg_pct"] = m.chg_pct
-        for n, day, r in ((5, d5, m.ret_5d), (20, d20, m.ret_20d)):
+        for n, day, r in ((5, d5, m.ret_5d), (20, d20, m.ret_20d), (60, d60, m.ret_60d)):
             if r is None or day is None:
                 continue
             base = h.close(code, day)
@@ -130,3 +136,5 @@ def build_stock_facts(ctx: RunContext) -> None:
             values[f"ret_{n}d_pct"] = r
             srcs.append(reg.add_day_quotes(h.day_quotes(m.market, day)))
         m.fact = ctx.facts.add(srcs, text, values, "price_momentum", code)
+        if m.fund is not None:
+            m.fund_fact = m.fund.add_fact(ctx, m.name)

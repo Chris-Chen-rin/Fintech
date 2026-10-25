@@ -5,7 +5,7 @@ import datetime as dt
 import sys
 from pathlib import Path
 
-from .settings import SettingsError, code_version, get_secret, load_settings
+from .settings import AGENT_NAMES, SettingsError, code_version, get_secret, load_settings
 from .trading_calendar import TradingCalendar, now_tpe, to_tpe
 
 
@@ -23,11 +23,20 @@ def doctor(args: argparse.Namespace) -> int:
 
     print(f"✓ 設定檔：{settings.source_file}")
     print(f"  隊伍代號：{settings.team_id}")
-    print(f"  主題：{settings.theme.name or '（未設定）'}，標的 {len(settings.theme.tickers)} 檔")
-    print(f"  LLM：{settings.llm.provider} {settings.llm.model}".rstrip())
-    if settings.llm.api_key_env:
-        found = get_secret(settings.llm.api_key_env) is not None
-        print(f"  金鑰 {settings.llm.api_key_env}：{'已找到' if found else '找不到'}")
+    theme = settings.theme
+    detail = {"tickers": f"標的 {len(theme.tickers)} 檔", "industries": "產業：" + "、".join(theme.industries),
+              "rule": f"條件 {len(theme.rules)} 條", "llm": f"分類檔 {theme.membership_file}", "none": "不考慮主題"}
+    print(f"  主題：{theme.name or '（未命名）'}（模式 {theme.mode}，{detail[theme.mode]}）")
+    from .agents import LLM_AGENTS
+    print("  Agent 模型：")
+    keys: set[str] = set()
+    for name in AGENT_NAMES:
+        chain = [s for s in (settings.llm.for_agent(name), settings.llm.fallback_for(name)) if s]
+        keys |= {s.api_key_env for s in chain if s.api_key_env}
+        ready = "" if not chain or name in LLM_AGENTS else "（LLM 版尚未實作，先用規則版）"
+        print(f"    {name:<18}" + " → ".join([s.label for s in chain] + ["規則版"]) + ready)
+    for key in sorted(keys):
+        print(f"  金鑰 {key}：{'已找到' if get_secret(key) is not None else '找不到'}")
     print(f"  資料根目錄：{settings.paths.root}")
     print(f"  程式版本：{code_version()}")
     print(f"  現在（台北）：{moment:%Y-%m-%d %H:%M:%S}")

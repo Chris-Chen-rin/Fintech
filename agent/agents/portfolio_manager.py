@@ -46,7 +46,7 @@ class RulePortfolioManagerAgent:
         book, nav, prices = ctx.book, ctx.book.nav, ctx.prices
         risk = ctx.settings.risk
         held = ctx.held
-        theme = set(ctx.settings.theme.tickers)
+        theme_score = ctx.theme.score if ctx.theme else (lambda code: 0.0)
         retry = len(feedback or [])
         margin = 0.005 * min(retry, 4)
         lo, hi = mv.cash_range
@@ -78,11 +78,24 @@ class RulePortfolioManagerAgent:
             return t in prices and prices[t] * 1000 <= 0.5 * base_weight * nav
 
         pool = [t for t in ranked if t not in held and affordable(t) and theses[t].view == "positive"]
-        pool.sort(key=lambda t: (bool(theme) and t not in theme, -score(t)))
+        pool.sort(key=lambda t: (-theme_score(t), -score(t)))
+        members = ctx.theme.members if ctx.theme and ctx.theme.active else None
+        room_out = len(pool)
+        if members:
+            # 主題核心池占淨值要高於下限（留 5 個百分點緩衝）：限制非成員的檔數
+            share_in = min(1.0, (ctx.settings.theme.min_weight + 0.05) / max(equity, 0.01))
+            room_out = max(0, int(n_target * (1 - share_in)) - sum(t not in members for t in keep))
+            outsiders = [t for t in pool if t not in members][:room_out]
+            pool = [t for t in pool if t in members] + outsiders
         new = pool[:max(0, n_target - len(keep))]
         if len(keep) + len(new) < risk.min_holdings:
             backup = [t for t in ranked if t not in held and t not in new and affordable(t) and theses[t].view == "neutral"]
+            if members:
+                backup = [t for t in backup if t in members] + [t for t in backup if t not in members][:max(0, room_out - sum(t not in members for t in new))]
             new += backup[:risk.min_holdings - len(keep) - len(new)]
+        if len(keep) + len(new) < risk.min_holdings:  # 檔數下限優先於主題比重
+            rest = [t for t in ranked if t not in held and t not in new and affordable(t) and theses[t].view != "negative"]
+            new += rest[:risk.min_holdings - len(keep) - len(new)]
         selected = keep + new
 
         scores = {t: score(t) for t in selected if t in theses}
@@ -154,15 +167,16 @@ class RulePortfolioManagerAgent:
                 action = "ADD" if delta > 0 else "TRIM"
             cap = risk.weight_cap(t)
             risk_check = (f"目標權重 {tw:.2%}（內部上限 {cap:.0%}、規則上限 {R.weight_cap(t):.0%}）；"
-                          f"原權重 {w_cur:.2%}" + ("；動能轉弱且排名落後，出清讓出名額" if t in drops else ""))
+                          f"原權重 {w_cur:.2%}" + ("；綜合分數轉弱且排名落後，出清讓出名額" if t in drops else ""))
             decisions.append(Decision(t, action, tw, (refs + [CONSTRUCTION])[:8], risk_check[:300]))
         return PortfolioPlan(decisions, no_trades, [construction])
 
     def _construction_thesis(self, ctx: RunContext, mv: MarketView, n_selected: int, n_candidates: int) -> Thesis:
         risk = ctx.settings.risk
         tokens = " ".join(f"{{{k}}}" for k in mv.basis)
+        pool = (f"（主題核心池 {len(ctx.theme.members)} 檔優先）" if ctx.theme and ctx.theme.active else "")
         logic = (f"依市場事實 {tokens} 的判斷（{mv.regime}／{mv.stance}），目標現金比 {mv.cash_target:.0%}、"
-                 f"宣告區間 {mv.cash_range[0]:.0%}–{mv.cash_range[1]:.0%}。組合規則：從 {n_candidates} 檔候選中依動能分數挑選 "
+                 f"宣告區間 {mv.cash_range[0]:.0%}–{mv.cash_range[1]:.0%}。組合規則：從 {n_candidates} 檔候選{pool}中依優質動能綜合分數挑選 "
                  f"{n_selected} 檔，以分數傾斜 ±{self.TILT:.0%} 的等權重配置，2330 上限 {risk.tsmc_max_weight:.0%}、其他個股 "
                  f"{risk.stock_max_weight:.0%}；權重偏離小於 {risk.no_trade_band:.1%} 的持股不調整，每日最多出清 {self.MAX_SWAPS} 檔以控制周轉成本。")
         return Thesis(CONSTRUCTION, [], list(mv.basis), logic[:1000],
@@ -186,7 +200,7 @@ class RulePortfolioManagerAgent:
         names = "、".join(ctx.name(t) for t in sold)
         logic = (f"買進 {'、'.join(top_buys)} 等部位需要資金，若不賣出現金比將低於宣告下限 {mv.cash_range[0]:.0%}。"
                  f"選擇 {names} 讓位（" + "、".join(f"{{{p}}}" for p in premises) +
-                 "），理由是其動能分數在持股中最低或權重高於目標，減碼對組合影響最小；賣出所得資金用於支應上述買進（資金調度）。")
+                 "），理由是其綜合分數在持股中最低或權重高於目標，減碼對組合影響最小；賣出所得資金用於支應上述買進（資金調度）。")
         plan.theses.append(Thesis(FUNDING, sold, premises, logic[:1000], f"資金調度：賣出 {len(sold)} 檔支應買進",
                                   None, "neutral", None, None, "portfolio_manager/rule"))
         for d in sells:

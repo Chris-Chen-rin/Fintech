@@ -22,9 +22,10 @@
 
 | 事項 | 狀態 | 怎麼處理 |
 |---|---|---|
-| ETF 投資主題與理念 | 待定（策略說明文件稍晚寫好） | 寫在設定檔，所有 Agent 的提示詞從設定讀取；**首日執行前要填好**。影響見主題影響分析 |
-| LLM 供應商 | 待定 | 統一介面；先用規則版 Agent 開發與測試 |
-| LLM API 金鑰 | 尚未申請 | 首日若仍未取得，全部 Agent 使用規則版 |
+| ETF 投資主題與理念 | 待定（策略說明文件稍晚寫好）；不一定有主題代號清單 | `theme.mode` 五種：`tickers` 代號清單、`industries` 產業別、`rule` 量化條件（已持有用較寬鬆的退出門檻）、`llm` 賽前分類檔、`none` 不考慮主題（`agent/theme.py`）。影響見主題影響分析 |
+| LLM 供應商 | 待定；可能五個 Agent 用不同模型 | `llm.default`／`llm.agents.<名稱>`／`llm.fallback.<名稱>` 分別設定；每個步驟依序試 [主模型, 備援模型, 規則版]。多家供應商時 D-Plan 的 `model_provider` 填 `other`，`model_version` 列出各 Agent 模型（例 `pm:claude-x;mk:gpt-x;rs:rule`），完整對照存 `archive/.../models.json`。**此填法建議先在 Slack 向主辦方確認** |
+| ETF 名稱與核心選股池 | 暫定「主動台灣優質動能精選」 | `theme.mode: rule`：近四季歸屬母公司淨利 > 0、市值前 100 名（已持有放寬到 120 名）；核心池占淨值下限 60%，投資組合經理會限制非成員檔數 |
+| LLM API 金鑰 | OpenRouter 已取得（免費額度每日 50 次） | 五個 Agent 的模型已寫進設定；LLM 版 Agent 實作前仍跑規則版 |
 | 每日操作 | 晚上與早上都可以 | 晚間送基準版，早上視情況更新 |
 | 隊伍代號 | 已有 | 寫進設定檔 |
 
@@ -52,15 +53,15 @@
 | M0 | 專案骨架與設定 | 設定檔、環境變數 → `Settings` | ✅ 完成 |
 | M1 | 時間與交易日曆 | 現在時間、休市日 → 目標交易日、繳交時段、前一交易日 | ✅ 完成 |
 | M2 | 資料包讀取 | DataPack → `Book`（現金、可交易淨值、持股、合規狀態） | ✅ `agent/datapack.py` |
-| M3 | 資料工具 | 各資料源 → 結構化資料＋原始快照（行情、法人、月營收、重大訊息、美股、夜盤、新聞） | 🟡 行情完成（`agent/tools/market_data.py`）；其餘在里程碑 D |
+| M3 | 資料工具 | 各資料源 → 結構化資料＋原始快照（行情、法人、月營收、重大訊息、美股、夜盤、新聞） | 🟡 行情（61 個交易日）與財報完成（`agent/tools/fundamentals.py`：公開資訊觀測站損益表／現金流量表彙總、月營收，本益比／股價淨值比、市值排名）；法人、重大訊息、美股、新聞在里程碑 D |
 | M4 | 來源登錄 | 每次抓取 → `sources`（S、authority、url、時點、存檔連結） | ✅ `agent/sources.py` |
-| M5 | 量化工具 | 行情與財務資料 → 數字型事實（漲跌、動能、營收年增、籌碼、估值、主題內排名） | 🟡 最小版完成（`agent/tools/quant.py`：漲跌、5／20 日動能、漲跌家數） |
+| M5 | 量化工具 | 行情與財務資料 → 數字型事實（漲跌、動能、營收年增、籌碼、估值、主題內排名） | 🟡 漲跌、5／20／60 日動能、漲跌家數；每檔一筆財報事實（EPS、近四季 EPS、淨利、營業現金流、營收年增、本益比、股價淨值比）。研究分數 = 0.5×品質（ROE、EPS 年增、累計營收年增、現金流量）＋0.5×動能，近四季虧損扣分 |
 | M6 | Agent 協作框架 | 各 Agent 的輸入輸出契約（JSON 結構）、暫時代號、退回與重試、紀錄存檔 | ✅ `agent/framework/` |
 | M7 | 風控閘門 | 投資組合經理的決策 → 通過，或違規清單（退回用） | ✅ `agent/risk_gate.py` |
 | M8 | 委託推導 | 決策、淨值、收盤價、現持股 → `orders`（沿用 `dplan_checker.portfolio.target_shares`） | ✅ `agent/orders.py` |
 | M9 | D-Plan 組裝 | 各層結果 → 統一編號、引用鏈、`agent_metadata`、檔名 | ✅ `agent/dplan.py` |
 | M10 | 檢查與退回 | 檢查器報告 → 依錯誤所在的層退回負責的 Agent | ✅ `agent/run_daily.py`（目前退回投資組合經理） |
-| M11 | LLM 介面 | 提示詞＋JSON 結構 → 結構化結果；可切換供應商；重試；記錄 token | |
+| M11 | LLM 介面 | 提示詞＋JSON 結構 → 結構化結果；可切換供應商；重試；記錄 token | 🟡 骨架完成（`agent/llm/`：OpenAI 相容〔OpenAI／xAI／DeepSeek／自架〕、Anthropic、Gemini、Mock；`agent/agents/llm_base.py`；metadata 計算）。尚未實際呼叫過 API |
 | M12 | 每日執行入口 | 一條指令或 Colab notebook → D-Plan＋存檔 | 🟡 本機指令完成（`python -m agent run`）；Colab 在里程碑 B |
 | M13 | 主動投資比率資料 | 30 檔主動型 ETF 前 15 大持股 → 風控閘門與檢查器 | |
 | — | `dplan_checker` 檢查器 | D-Plan → 檢查報告 | ✅ 完成 |
@@ -108,7 +109,7 @@
 
 | 順序 | 工作 | 說明 |
 |---|---|---|
-| C1 | M11 LLM 介面 | 結構化輸出、重試、token 紀錄 |
+| C1 | M11 LLM 介面 | 骨架已完成；剩下用真金鑰各打一次、確認回應格式與 token 欄位 |
 | C2 | A5 投資組合經理 LLM 版 | 讓 Agent 真正做投資決策；風控閘門退回機制在此驗證 |
 | C3 | A2 市場策略 LLM 版 | |
 | C4 | A3 研究 LLM 版 | 依產業分組並行 |
