@@ -1,0 +1,16 @@
+# 細搜尋：以「60+5日／品質50%／前3大／換3」為中心踏小步；每日出清上限固定 3。
+# 3 × 3 × 3 = 27 組。
+#   動能：60 日與 5 日，權重 6:4／5:5／4:6；品質：中心 ±10%；錨定：中心 ±1
+# 指令：python -m agent optimize --start 2026-04-01 --end 2026-10-22 --split 2026-07-31 --grid config/optimize_grid_fine.yaml --workers 10 --offline
+# 報告：rehearsals/optimize_20260401_20261022_optimize_grid_fine/results.md
+
+momentum: # 名稱: {交易日數: 權重}，權重合計 1
+  60+5日(6比4): {60: 0.6, 5: 0.4}
+  60+5日(5比5): {60: 0.5, 5: 0.5}
+  60+5日(4比6): {60: 0.4, 5: 0.6}
+
+quality_share: [0.4, 0.5, 0.6]
+
+anchor_top_n: [2, 3, 4]
+
+max_swaps: [3]

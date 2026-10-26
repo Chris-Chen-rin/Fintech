@@ -1,0 +1,16 @@
+# 粗搜尋：以「60+5日／品質50%／前5大／換3」為中心，每個參數往兩側各踏一大步，找哪個方向比較好。
+# 3 × 3 × 3 = 27 組（含中心，用新程式重跑才能和其他組比較）。
+# 第一組會在主程序連網抓行情與財報、其餘離線平行。
+# 指令：python -m agent optimize --start 2026-04-01 --end 2026-10-22 --split 2026-07-31 --grid config/optimize_grid_coarse.yaml --workers 10
+# 報告：rehearsals/optimize_20260401_20261022_optimize_grid_coarse/results.md
+
+momentum: # 名稱: {交易日數: 權重}，權重合計 1
+  40+5日: {40: 0.5, 5: 0.5}     # 長天期縮短
+  60+5日: {60: 0.5, 5: 0.5}     # 中心
+  60+10日: {60: 0.5, 10: 0.5}   # 短天期拉長
+
+quality_share: [0.25, 0.5, 0.75]
+
+anchor_top_n: [3, 5, 8]
+
+max_swaps: [3]
