@@ -1,0 +1,72 @@
+# 全隊共用的正式設定（進版本控制）。只寫金鑰的環境變數名稱，金鑰本身放 .env 或 Colab Secrets。
+# 參數與提示詞都算程式碼的一部分：改了就要 commit，code_version 才會跟著更新。
+
+team_id: TEAM_11770 # 主辦方配發的隊伍代號
+
+theme: # 各欄位說明見 settings.example.yaml
+  name: "主動台灣優質動能精選" # ETF 主題名稱，與「ETF 投資策略說明文件」一致
+  description: "聚焦台股大型優質成長企業，結合獲利品質與短中期動能，追求中長期資本增值。"
+  mode: rule # 核心選股池：近四季歸屬母公司淨利為正、市值在 150 檔中前 100 名（已持有放寬到前 120 名）
+  min_weight: 0.6 # 核心池成員占淨值的下限；投資組合經理會限制非成員檔數，留 5 個百分點緩衝
+  tickers: []
+  industries: []
+  rules:
+    - {metric: ni_ttm, min: 1} # 千元；> 0 即近四季獲利
+    - {metric: market_cap_rank, max: 100, held_max: 120}
+  membership_file: null
+
+risk: # 內部風控值，比比賽規則更保守
+  min_holdings: 22 # 規則 20–30 檔
+  max_holdings: 28
+  tsmc_max_weight: 0.23 # 規則 25%
+  stock_max_weight: 0.09 # 規則 10%
+  cash_target_range: [0.03, 0.15] # 規則 0–25%
+  first_day_cash_target: 0.06 # 首日建倉後的目標現金比
+  no_trade_band: 0.015 # 權重偏離小於此值就不調整
+  min_weights: # 個股最低持有比例；0 = 不強制，完全由分數決定
+    "2330": 0.0
+
+strategy: # 選股與配置參數（說明見 settings.example.yaml）；依 2026/4/1～10/22 規則版回測（粗搜尋 27 組＋細搜尋 27 組）選定，初賽期間不調整
+  momentum: {60: 0.5, 5: 0.5}
+  quality_share: 0.5
+  anchor_top_n: 3
+  max_swaps: 3
+
+llm: # Gemini API；金鑰放 .env 或 Colab Secrets 的 GEMINI_API_KEY。LLM 失敗或額度用完時依序改用備援模型、最後規則版
+  # 免費額度（約）：Flash-Lite 500 次/天（主力）、3.8 Flash 約 20 次/天（稀缺，只給反方審查與投資組合經理）
+  # 一次完整執行約 8～12 次呼叫（研究依產業分 3～4 批並行），其中 3.8 Flash 2～3 次
+  max_calls_per_run: 30 # 一次執行最多呼叫 LLM 幾次（含失敗重試），超過就改用規則版
+  daily_call_limit: 150 # 所有模型合計的每日上限（太平洋時間換日）
+  default: null
+  agents:
+    intel: {provider: google, model: gemini-3.5-flash-lite, api_key_env: GEMINI_API_KEY,
+            max_output_tokens: 16000, timeout: 180, extra: {seed: 42, thinkingConfig: {thinkingLevel: low}}}
+    market: {provider: google, model: gemini-3.5-flash-lite, api_key_env: GEMINI_API_KEY,
+             max_output_tokens: 8000, timeout: 180, extra: {seed: 42, thinkingConfig: {thinkingLevel: low}}}
+    research: {provider: google, model: gemini-3.5-flash-lite, api_key_env: GEMINI_API_KEY,
+               max_output_tokens: 16000, timeout: 240, extra: {seed: 42, thinkingConfig: {thinkingLevel: low}}}
+    reviewer: {provider: google, model: gemini-3.8-flash, api_key_env: GEMINI_API_KEY, daily_limit: 3,
+               max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+    portfolio_manager: {provider: google, model: gemini-3.8-flash, api_key_env: GEMINI_API_KEY, daily_limit: 3,
+                        max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+  fallback: # 依序嘗試；3.8 Flash 額度用完立即降級為 Flash-Lite，再不行用 Gemma 4
+    intel:
+      - {provider: google, model: gemini-3.1-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 16000, timeout: 180, extra: {seed: 42}}
+      - {provider: google, model: gemma-4-31b-it, api_key_env: GEMINI_API_KEY, max_output_tokens: 16000, timeout: 240, extra: {seed: 42}}
+    market:
+      - {provider: google, model: gemini-3.8-flash, api_key_env: GEMINI_API_KEY, daily_limit: 4, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+      - {provider: google, model: gemma-4-31b-it, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+    research:
+      - {provider: google, model: gemini-3.1-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 16000, timeout: 240, extra: {seed: 42}}
+      - {provider: google, model: gemma-4-31b-it, api_key_env: GEMINI_API_KEY, max_output_tokens: 16000, timeout: 300, extra: {seed: 42}}
+    reviewer:
+      - {provider: google, model: gemini-3.5-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 180, extra: {seed: 42}}
+      - {provider: google, model: gemma-4-31b-it, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+    portfolio_manager:
+      - {provider: google, model: gemini-3.5-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 180, extra: {seed: 42}}
+      - {provider: google, model: gemma-4-31b-it, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+
+holidays: ["2026-10-23", "2026-10-26"] # 休市日；10/23 會影響首日的「前一交易日」（應為 10/22）
+
+paths:
+  data_root: null # 資料根目錄；留空時依序使用環境變數 AGENT_DATA_ROOT、專案根目錄

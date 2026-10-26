@@ -1,12 +1,13 @@
 # AI Agent 基金經理人（2026 玉山人工智慧公開挑戰賽・初賽）
 
 多個 AI Agent 分工合作，每個交易日讀取主辦方的資料包（DataPack），產生一份合格的 **D-Plan**（當日投資決策 JSON），由隊員上傳到後台並送出。
-初賽期間 10/26 ～ 11/27，暫定主題「主動台灣優質動能精選」（策略仍由組員討論中，參數都可調）。
+初賽期間 10/26 ～ 11/27，主題「主動台灣優質動能精選」。
 
 **原則**
 
 - 決策內容一律由程式與 Agent 產生，**不得手改 D-Plan JSON**；要調整就改程式或設定後重跑。
-- 金鑰不進 repo（`.env`、`config/settings.yaml` 已列入 `.gitignore`）。
+- 金鑰不進 repo（`.env` 已列入 `.gitignore`）。`config/settings.yaml` 是全隊共用的正式設定，只寫金鑰的環境變數名稱、不寫金鑰本身。
+- 策略參數在初賽開始前依回測選定，初賽期間不為了個別交易日的持股或績效調整；要改就改程式或設定並 commit 寫明原因。
 - 上傳與送出由隊員手動操作。
 
 ---
@@ -22,7 +23,6 @@ git clone https://github.com/Chris-Chen-rin/Fintech.git
 cd Fintech
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item config\settings.example.yaml config\settings.yaml
 ```
 
 ### macOS／Linux
@@ -32,29 +32,17 @@ git clone https://github.com/Chris-Chen-rin/Fintech.git
 cd Fintech
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-cp config/settings.example.yaml config/settings.yaml
 ```
 
 以下指令以 Windows 寫法為例；macOS／Linux 把 `.venv\Scripts\python.exe` 換成 `.venv/bin/python`。
 
-### 填設定檔 `config/settings.yaml`
+### 設定檔
 
-範本預設**全部用規則版 Agent**（不需要金鑰就能跑）。要接上隊上目前的設定，修改以下幾處：
+`config/settings.yaml` 已在 repo 裡，是全隊共用的正式設定（隊伍代號、主題、風控、策略參數、Gemini 模型配置），clone 下來就能用，**不要再從範本複製覆蓋**。
 
-```yaml
-team_id: TEAM_11770
-
-theme:
-  name: "主動台灣優質動能精選"
-  description: "聚焦台股大型優質成長企業，結合獲利品質與短中期動能，追求中長期資本增值。"
-  mode: rule
-  min_weight: 0.6
-  rules:
-    - {metric: ni_ttm, min: 1}                              # 近四季歸屬母公司淨利 > 0
-    - {metric: market_cap_rank, max: 100, held_max: 120}    # 市值前 100 名（已持有放寬到 120 名）
-```
-
-要使用 LLM 版 Agent，把範本 `llm:` 區塊中 `agents` 與 `fallback` 底下的註解取消（Gemini 配置），並設定金鑰（見下一步）。
+- 要修改請 commit，D-Plan 記錄的程式版本才會跟著更新。
+- `config/settings.example.yaml` 是說明各欄位的範本，預設全部用規則版 Agent，測試也使用這份。
+- 想用個人設定試驗時，另存一份檔案並用 `--settings 路徑` 或環境變數 `AGENT_SETTINGS` 指定，不要改動共用的那份。
 
 ### 設定金鑰
 
@@ -113,13 +101,15 @@ GEMINI_API_KEY=你的金鑰
 - 每個 Agent 都有 LLM 版與規則版：主模型 → 備援模型 → 規則版，任一層失敗就往下降級。
 - LLM 額度控管：每次執行與每日的呼叫上限、稀缺模型（3.8 Flash）每日上限，計數存在 `cache/llm_calls.json`。
 
-### 投資策略（暫定，可調）
+### 投資策略
+
+依 2026/4/1～10/22 規則版回測選定（粗搜尋 27 組、細搜尋 27 組，挑前後段都穩定、相鄰參數也表現好的組合），初賽期間不調整。
 
 | 項目 | 目前設定 | 設定位置 |
 |---|---|---|
 | 核心選股池 | 近四季獲利、市值前 100 名（約 98 檔），占淨值至少 60% | `theme` |
-| 選股分數 | 品質 50%（ROE、EPS 年增、累計營收年增、現金流量）＋動能 50%（60／20／5 日報酬，權重 0.4／0.4／0.2） | `strategy.momentum`、`strategy.quality_share` |
-| 市值錨定 | 不使用（可設前 N 大依市值比例配置，超過上限的部分給分數高的股票） | `strategy.anchor_top_n` |
+| 選股分數 | 品質 50%（ROE、EPS 年增、累計營收年增、現金流量）＋動能 50%（60 日與 5 日報酬各半） | `strategy.momentum`、`strategy.quality_share` |
+| 市值錨定 | 市值前 3 大依市值比例配置（受個股上限限制），超過上限的部分給分數高的股票 | `strategy.anchor_top_n` |
 | 持股與權重 | 22～28 檔；台積電上限 23%、其他 9%；現金 3%～15% | `risk` |
 | 控制周轉成本 | 權重偏離 < 1.5% 不調整；每天最多出清 3 檔 | `risk.no_trade_band`、`strategy.max_swaps` |
 | 個股分析原則 | 營收看年增與較上月、股價與基本面矛盾要找原因等 | `config/research_playbook.md`（改文字即可） |
@@ -171,7 +161,8 @@ Fintech/
 │  └─ tools/                 行情、財報、重大訊息、量化指標、矛盾訊號
 ├─ dplan_checker/            D-Plan 檢查器（比照主辦方規則，可單獨使用）
 ├─ config/
-│  ├─ settings.example.yaml  設定範本（進 repo）；settings.yaml 為實際設定（不進 repo）
+│  ├─ settings.yaml          全隊共用的正式設定
+│  ├─ settings.example.yaml  各欄位說明的範本（測試使用）
 │  ├─ optimize_grid.yaml     回測的參數組合
 │  └─ research_playbook.md   個股分析手冊（研究與反方審查 Agent 的提示詞會載入）
 ├─ datapack/                 範例資料包

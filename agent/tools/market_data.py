@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .http import FetchError, HttpClient
+from .http import FetchError, HttpClient, atomic_write
 
 TWSE_DAY_URL = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={ymd}&type=ALLBUT0999&response=json"
 TPEX_DAY_URL = "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes?date={y}%2F{m}%2F{d}&response=json"
@@ -174,7 +174,8 @@ class PriceStore:
 
     def mark_closed(self, day: dt.date) -> None:
         for market in ("twse", "tpex"):
-            self._path(market, day).write_text(json.dumps({"closed": True, "date": day.isoformat()}), encoding="utf-8")
+            if self.cached(market, day) is not False:
+                atomic_write(self._path(market, day), json.dumps({"closed": True, "date": day.isoformat()}))
 
     def day(self, market: str, day: dt.date) -> DayQuotes | None:
         """取得某市場某日行情；資料不存在（未公布或休市）回傳 None。"""
@@ -196,7 +197,7 @@ class PriceStore:
             self.client.forget(url)
             return None
         dq = DayQuotes(market, day, url, fetched.fetched_at, str(fetched.snapshot), quotes, indices)
-        self._path(market, day).write_text(json.dumps(dq.to_json() | {"parser": PARSER_VERSION}, ensure_ascii=False), encoding="utf-8")
+        atomic_write(self._path(market, day), json.dumps(dq.to_json() | {"parser": PARSER_VERSION}, ensure_ascii=False))
         return dq
 
 

@@ -22,7 +22,7 @@ from typing import Any
 
 from ..sources import SourceRecord
 from ..trading_calendar import TPE, iso_tpe
-from .http import FetchError, HttpClient
+from .http import FetchError, HttpClient, atomic_write
 from .market_data import CLOSE_TIME
 
 MOPS_URL = ("https://mopsov.twse.com.tw/mops/web/ajax_{page}?encodeURIComponent=1&step=1&firstin=1&off=1"
@@ -308,8 +308,8 @@ class FundamentalsLoader:
             rows = cached["rows"]
         else:
             rows = parse_mops_summary(fetched.data, self._codes(market))
-            parsed.write_text(json.dumps({"parser": PARSER_VERSION, "fetched_at": fetched.fetched_at, "rows": rows},
-                                         ensure_ascii=False), encoding="utf-8")
+            atomic_write(parsed, json.dumps({"parser": PARSER_VERSION, "fetched_at": fetched.fetched_at, "rows": rows},
+                                            ensure_ascii=False))
         title = {"income": "綜合損益表", "cashflow": "現金流量表"}[kind]
         key = f"mops:{kind}:{market}:{season}"
         record = SourceRecord(

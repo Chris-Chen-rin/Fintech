@@ -1,4 +1,4 @@
-# Agent 設定範本。複製成 config/settings.yaml 後填入實際值（settings.yaml 不進版本控制）。
+# Agent 設定範本：說明各欄位，預設全部用規則版（測試使用這份）。正式設定是 config/settings.yaml（已進版本控制）。
 # 參數與提示詞都算程式碼的一部分：改了就要 commit，code_version 才會跟著更新。
 
 team_id: TEAM_000            # 主辦方配發的隊伍代號

@@ -4,9 +4,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# 金鑰與實際設定
+# 金鑰（config/settings.yaml 只寫環境變數名稱，進版本控制）
 .env
-config/settings.yaml
 
 # 每日資料（放在共用雲端硬碟）
 inbox/

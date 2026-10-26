@@ -160,7 +160,9 @@ def build_stock_facts(ctx: RunContext) -> None:
             if m.low_to_high is not None:
                 text += f"，低點到高點上漲 {pct(m.low_to_high)}"
                 values["low_to_high_pct"] = m.low_to_high
-            srcs += [reg.add_day_quotes(h.day_quotes(m.market, d)) for d in (hd, ld) if d != last]
+            # 只引用區間起訖日（各股共用）：逐檔引用高低點當天的行情會讓 D-Plan 來源超過 50 筆上限
+            start = h.dates[-min(61, len(h.dates))]
+            srcs.append(reg.add_day_quotes(h.day_quotes(m.market, start)))
         m.fact = ctx.facts.add(list(dict.fromkeys(srcs))[:10], text, values, "price_momentum", code)
         if m.fund is not None:
             m.fund_fact = m.fund.add_fact(ctx, m.name)

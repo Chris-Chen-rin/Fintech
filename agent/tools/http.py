@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import http.client
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -22,6 +23,20 @@ MIN_INTERVAL = {"www.twse.com.tw": 3.0, "www.tpex.org.tw": 1.0, "mopsov.twse.com
 
 class FetchError(Exception):
     """資料源無法取得或內容不可用。"""
+
+
+def atomic_write(path: Path, data: bytes | str) -> None:
+    """先寫暫存檔再整檔替換：平行執行時其他程序不會讀到寫到一半（或剛清空）的快取。"""
+    raw = data.encode("utf-8") if isinstance(data, str) else data
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(raw)
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:  # Windows：目標檔正被其他程序讀取時無法替換，稍等重試
+            time.sleep(0.05 * (attempt + 1))
+    tmp.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -89,9 +104,9 @@ class HttpClient:
                 self._last_hit[host] = time.monotonic()
         self.request_count += 1
         fetched_at = iso_tpe(now_tpe())
-        body_path.write_bytes(gzip.compress(body))
-        meta_path.write_text(json.dumps({"url": url, "tag": tag, "fetched_at": fetched_at, "bytes": len(body)},
-                                        ensure_ascii=False), encoding="utf-8")
+        atomic_write(body_path, gzip.compress(body))
+        atomic_write(meta_path, json.dumps({"url": url, "tag": tag, "fetched_at": fetched_at, "bytes": len(body)},
+                                           ensure_ascii=False))
         return Fetched(url, body, fetched_at, body_path, False)
 
     def forget(self, url: str, tag: str = "") -> None:
