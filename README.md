@@ -1,7 +1,13 @@
 # AI Agent 基金經理人（2026 玉山人工智慧公開挑戰賽・初賽）
 
 多個 AI Agent 分工合作，每個交易日讀取主辦方的資料包（DataPack），產生一份合格的 **D-Plan**（當日投資決策 JSON），由隊員上傳到後台並送出。
-初賽期間 10/26 ～ 11/27，主題「主動台灣優質動能精選」。
+初賽期間 10/26 ～ 11/27。
+
+**ETF 投資主題與理念**（設定在 `config/settings.yaml` 的 `theme`，LLM Agent 的提示詞會帶入）
+
+- **名稱**：主動台灣優質動能精選
+- **主題**：聚焦台股大型優質成長企業，結合獲利品質與短中期動能
+- **理念**：本 ETF 聚焦台灣大型優質成長企業，以近四季獲利且市值居前的公司為核心選股範圍，綜合評估股東權益報酬率、獲利與營收成長及現金流量。選股評分由品質與動能各占 50%，其中動能結合 60 日與 5 日報酬，兼顧中期趨勢與短期變化，並以市值前三大企業作為配置錨點。AI Agent 整合企業財報、月營收、重大訊息與產業趨勢，透過研究與反方審查交叉檢視選股依據，釐清股價與基本面的矛盾訊號，精選兼具獲利品質、成長潛力與動能支持的標的。
 
 **原則**
 
@@ -74,6 +80,24 @@ GEMINI_API_KEY=你的金鑰
 | 接著 | 執行 `.venv\Scripts\python.exe -m agent run` |
 | 通過檢查後 | 上傳 `out/D-Plan_<隊伍代號>_<交易日>.json`，確認收件層檢核通過後**按送出**，再到「當日委託」核對 |
 | T 08:55 | 繳交截止（以最後一次送出的版本為準） |
+
+### 執行步驟（Windows PowerShell，在專案資料夾內）
+
+```powershell
+git pull                                          # 取得最新程式與設定
+.venv\Scripts\python.exe -m agent doctor          # 確認：交易日正確、繳交時段「目前開放中」、金鑰已找到、程式版本沒有 -dirty
+Copy-Item "$env:USERPROFILE\Downloads\DataPack_*.json" inbox\   # 把後台下載的資料包放進 inbox/（路徑依實際下載位置）
+.venv\Scripts\python.exe -m agent run             # 產生 D-Plan；通過檢查會輸出到 out\D-Plan_TEAM_11770_<交易日>.json
+```
+
+其他情況：
+
+```powershell
+.venv\Scripts\python.exe -m agent run --datapack 資料包路徑.json   # 不放 inbox/，直接指定資料包
+.venv\Scripts\python.exe -m agent run --rules-only                  # LLM 異常或時間不夠：全部用規則版 Agent，不呼叫 LLM
+```
+
+執行結束會印出「✓ D-Plan 已輸出：…」；若印出「✗ D-Plan 未通過檢查」，看提示的 `check_report.txt`，修程式或設定後重跑，**不要手改 JSON**。
 
 - 程式會在 `inbox/` 找 `trade_date` 相符的資料包，跑完五個 Agent、風控與檢查器；**檢查器沒有錯誤才會複製到 `out/`**。
 - 每次執行的完整紀錄（資料包、各 Agent 輸入輸出、LLM 原始回應、D-Plan、檢查報告）存在 `archive/<交易日>/<執行時間>_<evening|morning>/`。

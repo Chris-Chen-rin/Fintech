@@ -132,6 +132,14 @@ def test_format_report_sections():
         assert part in text
 
 
+def test_theme_philosophy_in_brief(tmp_path):
+    raw = yaml.safe_load(EXAMPLE_SETTINGS_PATH.read_text(encoding="utf-8"))
+    raw["theme"].update(name="測試主題", description="描述。", philosophy="第一行，\n  第二行 60 日。\n")
+    p = tmp_path / "s.yaml"
+    p.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    assert load_settings(p).theme.brief() == "ETF 主題：測試主題。描述。\n投資理念：第一行，第二行 60 日。"
+
+
 def test_grid_exclude(tmp_path):
     from agent.settings import SettingsError
 

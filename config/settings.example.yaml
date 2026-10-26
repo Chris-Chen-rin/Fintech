@@ -5,7 +5,8 @@ team_id: TEAM_000            # 主辦方配發的隊伍代號
 
 theme:
   name: ""                   # ETF 主題名稱，與「ETF 投資策略說明文件」一致
-  description: ""            # 主題描述（llm 模式分類時使用）
+  description: ""            # 主題描述（llm 模式分類與 LLM Agent 提示詞使用）
+  philosophy: ""             # 投資理念（LLM Agent 提示詞使用），與「ETF 投資策略說明文件」一致
   mode: none                 # 主題成員的決定方式：
                              #   tickers    固定代號清單（填 tickers）
                              #   industries 依產業別（填 industries，名稱見 universe_150.json 的 industry，例如 半導體業、金融保險業）

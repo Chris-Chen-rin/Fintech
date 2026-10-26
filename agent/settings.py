@@ -54,6 +54,12 @@ class ThemeSettings:
     industries: tuple[str, ...] = ()
     rules: tuple[ThemeRule, ...] = ()
     membership_file: Path | None = None
+    philosophy: str = ""
+
+    def brief(self) -> str:
+        """提供給 LLM Agent 的主題說明。"""
+        text = f"ETF 主題：{self.name}。{self.description}"
+        return text + (f"\n投資理念：{self.philosophy}" if self.philosophy else "")
 
 
 @dataclass(frozen=True)
@@ -335,7 +341,8 @@ def _parse_theme(raw: dict[str, Any], errors: list[str], warnings: list[str]) ->
     elif mode == "none":
         warnings.append("尚未設定主題（theme.mode = none）：選股不考慮主題，主題占比檢查略過")
     return ThemeSettings(str(raw.get("name") or ""), tickers, min_weight, mode, str(raw.get("description") or ""),
-                         industries, tuple(rules), membership_file)
+                         industries, tuple(rules), membership_file,
+                         "".join(line.strip() for line in str(raw.get("philosophy") or "").splitlines()))
 
 
 def _model_spec(raw: Any, where: str, errors: list[str]) -> ModelSpec | None:

@@ -69,7 +69,7 @@ class LLMMarketAgent(LLMAgent):
         self._bounds = (lo, hi)
         system = (
             "你是台股主動式 ETF 的市場策略分析師，負責每天判斷整體市場並決定現金水位。"
-            f"ETF 主題：{ctx.settings.theme.name}。{ctx.settings.theme.description}\n"
+            f"{ctx.settings.theme.brief()}\n"
             "規則：regime 為 risk_on／neutral／risk_off；stance 為 aggressive／neutral／defensive；"
             "intent 為 increase（淨買超）／hold／reduce（淨賣超），要與目前現金比和你宣告的現金區間一致："
             "目前現金比高於區間上限就是 increase、低於下限就是 reduce、落在區間內是 hold。"
@@ -159,7 +159,7 @@ class LLMResearchAgent(LLMAgent):
     def _system(self, ctx: RunContext) -> str:
         return (
             "你是台股主動式 ETF 的個股研究員。"
-            f"ETF 主題：{ctx.settings.theme.name}。{ctx.settings.theme.description}\n"
+            f"{ctx.settings.theme.brief()}\n"
             f"每檔股票附上量化工具算好的優質動能分數（{ctx.settings.strategy.describe()}，z 分數）、"
             "相關事實（價量含近期高低點、財報、月營收含較上月增減、重大訊息），以及工具偵測的矛盾訊號。"
             "請逐檔判斷 view（positive／neutral／negative）與 score（-3～3，可參考量化分數但要有自己的判斷，"
@@ -328,7 +328,7 @@ class LLMPortfolioManagerAgent(LLMAgent):
         self._limits = (n_target, max_out, theme)
         system = (
             "你是台股主動式 ETF 的投資組合經理，依市場策略與研究員的推論決定今天的持股名單。"
-            f"ETF 主題：{ctx.settings.theme.name}。{ctx.settings.theme.description}\n"
+            f"{ctx.settings.theme.brief()}\n"
             f"限制：交易後持股 {risk.min_holdings}–{risk.max_holdings} 檔（建議 {n_target} 檔左右）；"
             + (f"非主題核心池的股票最多 {max_out} 檔；" if theme else "")
             + (f"市值前 {len(self._anchors)} 大（{'、'.join(self._anchors)}）由工具依市值比例自動納入，不要列入買賣名單，也計入檔數；"
