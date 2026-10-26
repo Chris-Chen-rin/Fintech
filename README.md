@@ -134,7 +134,7 @@ GEMINI_API_KEY=你的金鑰
 .venv\Scripts\python.exe -m dplan_checker out\D-Plan_TEAM_11770_2026-10-27.json --datapack inbox\DataPack.json --prices prev_close.json --team-id TEAM_11770
 ```
 
-演練與回測結果在 `rehearsals/`（不進 repo）。回測第一次需要連網抓歷史行情與財報（4～10 月約 1 小時），之後可加 `--offline`。
+`rehearse` 與 `optimize` 是開發與研究用工具，**不用於產生 D-Plan**；每日交件只用 `run`。演練與回測結果在 `rehearsals/`（不進 repo）。回測的 `results.md` 附有欄位說明、參數名稱的讀法與自動統整（贏大盤組數、前後段排名相關係數、前後段都穩定的組合、各參數的平均影響）。回測第一次需要連網抓歷史行情與財報（4～10 月約 1 小時），之後可加 `--offline`。
 
 ---
 
@@ -153,8 +153,8 @@ Fintech/
 │  ├─ orders.py              目標權重 → 委託股數
 │  ├─ dplan.py               組裝 D-Plan
 │  ├─ sources.py             來源登錄（每筆事實都能回對快照）
-│  ├─ rehearse.py            多日演練
-│  ├─ optimize.py            策略參數回測搜尋
+│  ├─ rehearse.py            多日演練（開發用，不用於產生 D-Plan）
+│  ├─ optimize.py            策略參數回測搜尋（開發用，不用於產生 D-Plan）
 │  ├─ agents/                五個 Agent（規則版、LLM 版）
 │  ├─ framework/             Agent 契約、執行與重試、紀錄
 │  ├─ llm/                   LLM 客戶端、JSON 修復、呼叫額度

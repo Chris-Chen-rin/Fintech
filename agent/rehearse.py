@@ -1,5 +1,8 @@
 """多日演練：用過去的真實行情連續跑多天，驗證第二天以後的持股調整。
 
+※ 開發與研究用工具，不用於產生 D-Plan：每日交件流程（python -m agent run → run_daily）不會載入本模組，
+  演練的 D-Plan 與資料包只寫到 rehearsals/，不會進 out/。
+
 每天：產生資料包 → 完整流程（Agent → 風控 → 檢查器）→ 以交易日收盤價成交（含手續費、證交稅）→ 下一天的資料包。
 注意：本益比、月營收等「只有最新一期」的資料用的是現在抓得到的版本，早期日子會有些微前視偏差；
 演練目的是檢查流程與規則行為，不是評估績效。
@@ -102,9 +105,11 @@ def rehearse(settings: Settings, start: dt.date, end: dt.date, offline: bool = F
 
     book, outcome, rows = Book(), "none", []
     taiex0 = history.day_quotes("twse", history.dates[history.dates.index(days[0]) - 1]).indices["TAIEX"]["close"]
+    last_close: dict[str, float] = {}  # 暫停交易的持股沿用最後收盤價計算淨值
     for day in days:
         prev = history.dates[history.dates.index(day) - 1]
-        prev_prices = history.closes(prev)
+        last_close.update(history.closes(prev))
+        prev_prices = dict(last_close)
         if not book.shares and outcome == "none":
             raw = first_day_datapack(settings.team_id, day, iso_tpe(dt.datetime.combine(prev, dt.time(19, 0), TPE)))
         else:
@@ -134,7 +139,13 @@ def rehearse(settings: Settings, start: dt.date, end: dt.date, offline: bool = F
                            decisions=len(doc["decisions"]), no_trades=len(doc["no_trade_decisions"]),
                            actions={a: sum(d["action"] == a for d in doc["decisions"])
                                     for a in ("BUY", "ADD", "TRIM", "SELL_ALL")})
-        prices = history.closes(day)
+        today = history.closes(day)
+        halted = sorted({o["ticker"] for o in orders if o["ticker"] not in today})
+        if halted:
+            orders = [o for o in orders if o["ticker"] in today]
+            row["halted"] = halted
+        last_close.update(today)
+        prices = dict(last_close)
         nav_before = book.nav(prices)
         traded = sum(o["shares"] * prices[o["ticker"]] for o in orders)
         outcome, cost = fill_orders(book, orders, prices) if orders else ("none", 0.0)
