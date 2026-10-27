@@ -55,21 +55,32 @@ llm: # Gemini API；金鑰放 .env 或 Colab Secrets 的 GEMINI_API_KEY。LLM �
                max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
     portfolio_manager: {provider: google, model: gemini-3.8-flash, api_key_env: GEMINI_API_KEY, daily_limit: 3,
                         max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
-  fallback: # 依序嘗試；3.8 Flash 額度用完立即降級為 Flash-Lite，再不行用 Gemma 4
+  fallback: # 依序嘗試；3.8 Flash 失敗或額度用完 → 3.6 Flash → 3 Flash（預覽版）→ Flash-Lite → 2.5 Flash-Lite → Gemma 4
     intel:
       - {provider: google, model: gemini-3.1-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 16000, timeout: 180, extra: {seed: 42}}
+      - {provider: google, model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 16000, timeout: 180, extra: {seed: 42}}
       - {provider: google, model: gemma-4-31b-it, api_key_env: GEMINI_API_KEY, max_output_tokens: 16000, timeout: 240, extra: {seed: 42}}
     market:
       - {provider: google, model: gemini-3.8-flash, api_key_env: GEMINI_API_KEY, daily_limit: 4, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+      - {provider: google, model: gemini-3.6-flash, api_key_env: GEMINI_API_KEY, daily_limit: 4, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+      - {provider: google, model: gemini-3-flash-preview, api_key_env: GEMINI_API_KEY, daily_limit: 4, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+      - {provider: google, model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 180, extra: {seed: 42}}
       - {provider: google, model: gemma-4-31b-it, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
     research:
       - {provider: google, model: gemini-3.1-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 16000, timeout: 240, extra: {seed: 42}}
+      - {provider: google, model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 16000, timeout: 240, extra: {seed: 42}}
       - {provider: google, model: gemma-4-31b-it, api_key_env: GEMINI_API_KEY, max_output_tokens: 16000, timeout: 300, extra: {seed: 42}}
     reviewer:
+      - {provider: google, model: gemini-3.6-flash, api_key_env: GEMINI_API_KEY, daily_limit: 3, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+      - {provider: google, model: gemini-3-flash-preview, api_key_env: GEMINI_API_KEY, daily_limit: 3, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
       - {provider: google, model: gemini-3.5-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 180, extra: {seed: 42}}
+      - {provider: google, model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 180, extra: {seed: 42}}
       - {provider: google, model: gemma-4-31b-it, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
     portfolio_manager:
+      - {provider: google, model: gemini-3.6-flash, api_key_env: GEMINI_API_KEY, daily_limit: 3, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
+      - {provider: google, model: gemini-3-flash-preview, api_key_env: GEMINI_API_KEY, daily_limit: 3, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
       - {provider: google, model: gemini-3.5-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 180, extra: {seed: 42}}
+      - {provider: google, model: gemini-2.5-flash-lite, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 180, extra: {seed: 42}}
       - {provider: google, model: gemma-4-31b-it, api_key_env: GEMINI_API_KEY, max_output_tokens: 8000, timeout: 240, extra: {seed: 42}}
 
 holidays: ["2026-10-23", "2026-10-26"] # 休市日；10/23 會影響首日的「前一交易日」（應為 10/22）

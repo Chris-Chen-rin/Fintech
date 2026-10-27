@@ -49,7 +49,7 @@ def test_openrouter_provider_and_json_mode(monkeypatch):
     assert ModelSpec("openrouter", "thinkingmachines/inkling:free", "K").dplan_provider == "other"
     sent = {}
 
-    def fake_post(url, headers, body, timeout):
+    def fake_post(url, headers, body, timeout, **_):
         sent.update(url=url, body=body)
         return {"model": "thinkingmachines/inkling:free", "usage": {"prompt_tokens": 5, "completion_tokens": 7},
                 "choices": [{"message": {"content": "```json\n{\"ok\": true}\n```"}}]}
@@ -61,9 +61,45 @@ def test_openrouter_provider_and_json_mode(monkeypatch):
     assert sent["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert "response_format" not in sent["body"] and sent["body"]["seed"] == 42
     assert result.data == {"ok": True} and result.output_tokens == 7
-    monkeypatch.setattr(P, "post_json", lambda *a: {"error": {"code": 429, "message": "rate limited"}})
+    monkeypatch.setattr(P, "post_json", lambda *a, **k: {"error": {"code": 429, "message": "rate limited"}})
     with pytest.raises(LLMError, match="rate limited"):
         client.complete_json("系統", "使用者")
+
+
+def _http_error(code):
+    import io
+    import urllib.error
+
+    return urllib.error.HTTPError("u", code, "x", {}, io.BytesIO(b"busy"))
+
+
+def test_post_json_busy_is_final_and_counts_retries(monkeypatch):
+    import agent.llm.base as B
+
+    sent = []
+    monkeypatch.setattr(B.time, "sleep", lambda s: None)
+    monkeypatch.setattr(B.urllib.request, "urlopen", lambda *a, **k: sent.append(1) or (_ for _ in ()).throw(_http_error(503)))
+    retried = []
+    with pytest.raises(B.Unavailable) as info:
+        B.post_json("http://x", {}, {}, 1, retries=3, on_retry=lambda: retried.append(1))
+    assert info.value.final and len(sent) == 3 and len(retried) == 2
+    sent.clear()
+    monkeypatch.setattr(B.urllib.request, "urlopen", lambda *a, **k: sent.append(1) or (_ for _ in ()).throw(_http_error(400)))
+    with pytest.raises(LLMError) as info:
+        B.post_json("http://x", {}, {}, 1)
+    assert not isinstance(info.value, B.Unavailable) and len(sent) == 1
+
+
+def test_scarce_model_sends_once(monkeypatch):
+    import agent.llm.providers as P
+
+    seen = {}
+    monkeypatch.setattr(P, "post_json", lambda *a, retries, on_retry: seen.setdefault(a[0], retries) and {})
+    monkeypatch.setenv("K", "secret")
+    for model, limit in (("scarce", 3), ("lite", None)):
+        with pytest.raises(LLMError):
+            make_client(ModelSpec("google", model, "K", daily_limit=limit)).complete_json("s", "u")
+    assert [seen[u] for u in sorted(seen, key=lambda u: "lite" in u)] == [1, 3]
 
 
 # ---------------------------------------------------------------- agent_metadata

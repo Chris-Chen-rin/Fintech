@@ -24,7 +24,16 @@ def _key(spec: ModelSpec, required: bool = True) -> str:
     return key or ""
 
 
-class OpenAICompatibleClient:
+class _Client:
+    """有每日上限的稀缺模型只送一次，失敗就換備援；其他模型遇到 429／5xx 最多送 3 次。"""
+    on_retry: Callable[[], None] | None = None
+
+    def _post(self, url: str, headers: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
+        retries = 1 if self.spec.daily_limit is not None else 3
+        return post_json(url, headers, body, self.spec.timeout, retries=retries, on_retry=self.on_retry)
+
+
+class OpenAICompatibleClient(_Client):
     """OpenAI、xAI、DeepSeek、OpenRouter 與任何相容 OpenAI Chat Completions 的服務（自架模型用 base_url）。"""
 
     def __init__(self, spec: ModelSpec):
@@ -44,7 +53,7 @@ class OpenAICompatibleClient:
         if self.spec.json_mode:
             body["response_format"] = {"type": "json_object"}
         started = time.monotonic()
-        data = post_json(f"{self.base}/chat/completions", headers, body, self.spec.timeout)
+        data = self._post(f"{self.base}/chat/completions", headers, body)
         if data.get("error"):
             raise LLMError(f"供應商回報錯誤：{str(data['error'])[:300]}")
         try:
@@ -62,7 +71,7 @@ class OpenAICompatibleClient:
                          time.monotonic() - started)
 
 
-class AnthropicClient:
+class AnthropicClient(_Client):
     URL = "https://api.anthropic.com/v1/messages"
 
     def __init__(self, spec: ModelSpec):
@@ -78,7 +87,7 @@ class AnthropicClient:
             "messages": [{"role": "user", "content": user}],
         }
         started = time.monotonic()
-        data = post_json(self.spec.base_url or self.URL, headers, body, self.spec.timeout)
+        data = self._post(self.spec.base_url or self.URL, headers, body)
         text = "".join(part.get("text", "") for part in data.get("content") or [] if part.get("type") == "text")
         if not text:
             raise LLMError(f"回應沒有文字內容：{str(data)[:300]}")
@@ -88,7 +97,7 @@ class AnthropicClient:
                          time.monotonic() - started)
 
 
-class GeminiClient:
+class GeminiClient(_Client):
     URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
     def __init__(self, spec: ModelSpec):
@@ -103,7 +112,7 @@ class GeminiClient:
                                  "responseMimeType": "application/json", **self.spec.extra},
         }
         started = time.monotonic()
-        data = post_json(url, {"x-goog-api-key": _key(self.spec)}, body, self.spec.timeout)
+        data = self._post(url, {"x-goog-api-key": _key(self.spec)}, body)
         try:
             text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"] if not p.get("thought"))
         except (KeyError, IndexError, TypeError) as exc:

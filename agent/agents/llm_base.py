@@ -47,8 +47,12 @@ class LLMAgent:
 
     def call(self, ctx: RunContext, system: str, user: str, feedback: list[str] | None = None, tag: str = "") -> Any:
         """呼叫一次模型並記錄（額度須先由呼叫端 reserve）；可在多執行緒中並行。"""
+        from ..llm.budget import charge
+
         user = self.with_feedback(user, feedback)
         name = self.name + (f"_{tag}" if tag else "")
+        if hasattr(self.client, "on_retry"):
+            self.client.on_retry = lambda: charge(ctx, self.name, self.spec)
         try:
             result = self.client.complete_json(system, user)
         except Exception as exc:

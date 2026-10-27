@@ -13,7 +13,7 @@ from dplan_checker import rules as R
 
 from ..framework.context import RunContext
 from ..framework.contracts import FACT_TOKEN, INTENTS, REGIMES, STANCES, VIEWS, MarketView, Review, Thesis
-from ..llm.base import LLMError
+from ..llm.base import LLMError, Unavailable
 from ..settings import PROJECT_ROOT
 from .llm_base import LLMAgent
 from .portfolio_manager import RulePortfolioManagerAgent, anchor_codes
@@ -200,6 +200,7 @@ class LLMResearchAgent(LLMAgent):
             reserve(ctx, self.name, self.spec)  # 先在主執行緒佔好額度，額度不足就整批不呼叫
         items: list[Any] = []
         errors: list[str] = []
+        busy = False
         with ThreadPoolExecutor(max_workers=len(batches)) as pool:
             futures = [pool.submit(self.call, ctx, system, self._user(ctx, b), feedback, f"b{i + 1}")
                        for i, b in enumerate(batches)]
@@ -209,10 +210,16 @@ class LLMResearchAgent(LLMAgent):
                     got = data.get("theses") if isinstance(data, dict) else None
                     items += got if isinstance(got, list) else []
                 except Exception as exc:  # noqa: BLE001 - 單批失敗時其他批照用，最後看合格檔數
+                    busy = busy or isinstance(exc, Unavailable)
                     errors.append(f"第 {i + 1} 批（{len(batches[i])} 檔）失敗：{exc}")
         if errors:
             ctx.log("  ⚠ 研究 " + "；".join(e[:150] for e in errors))
-        return self.parse(ctx, inputs, {"theses": items})
+        try:
+            return self.parse(ctx, inputs, {"theses": items})
+        except LLMError as exc:
+            if busy:
+                raise Unavailable(str(exc)) from exc
+            raise
 
     def parse(self, ctx: RunContext, inputs: dict[str, Any], data: Any) -> list[Thesis]:
         items = data.get("theses") if isinstance(data, dict) else None

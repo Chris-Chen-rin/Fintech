@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from ..settings import ModelSpec
 
@@ -119,11 +119,23 @@ def repair_json(text: str) -> str:
     return body + "".join(_CLOSERS[c] for c in reversed(open_))
 
 
-def post_json(url: str, headers: dict[str, str], body: dict[str, Any], timeout: float, retries: int = 3) -> dict[str, Any]:
-    """POST JSON；429 與 5xx 依序等待 2、4、8 秒重試。"""
+class Unavailable(LLMError):
+    """模型忙碌或超過速率限制（429／5xx）：同一模型再試只會更塞，直接換下一個模型。"""
+    final = True
+
+
+def post_json(url: str, headers: dict[str, str], body: dict[str, Any], timeout: float, retries: int = 3,
+              on_retry: Callable[[], None] | None = None) -> dict[str, Any]:
+    """POST JSON；429 與 5xx 依序等待 2、4 秒重試，最多送 retries 次。
+    on_retry 在每次重送前呼叫（供應商每次請求都算額度，本機也要跟著記）。"""
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
     last = ""
+    busy = False
     for attempt in range(retries):
+        if attempt:
+            time.sleep(2 ** attempt)
+            if on_retry:
+                on_retry()
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json", **headers}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -131,9 +143,10 @@ def post_json(url: str, headers: dict[str, str], body: dict[str, Any], timeout: 
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:500]
             last = f"HTTP {exc.code}：{detail}"
-            if exc.code != 429 and exc.code < 500:
+            busy = exc.code == 429 or exc.code >= 500
+            if not busy:
                 break
         except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
             last = str(exc)
-        time.sleep(2 ** (attempt + 1))
-    raise LLMError(f"呼叫 {url.split('?')[0]} 失敗：{last}")
+            busy = False
+    raise (Unavailable if busy else LLMError)(f"呼叫 {url.split('?')[0]} 失敗：{last}")

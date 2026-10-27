@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from .base import LLMError
 FILE = "llm_calls.json"
 QUOTA_TZ = dt.timezone(dt.timedelta(hours=-8))  # 太平洋標準時間；夏令時間期間換日晚 1 小時，只會多算不會少算
 TOTAL = "_total"
+_LOCK = threading.Lock()
 
 
 class BudgetExceeded(LLMError):
@@ -63,12 +65,21 @@ def reserve(ctx, agent: str, spec: Any) -> None:
     key = _key(agent, spec)
     if spec.daily_limit is not None and day.get(key, 0) >= spec.daily_limit:
         raise BudgetExceeded(f"{spec.model} 今日給 {agent} 的 {spec.daily_limit} 次已用完，改用備援")
-    ctx.llm_calls += 1
-    day[TOTAL] = day.get(TOTAL, 0) + 1
-    day[key] = day.get(key, 0) + 1
-    data = _load(cache)
-    cutoff = (dt.date.fromisoformat(_today()) - dt.timedelta(days=14)).isoformat()
-    data = {k: v for k, v in data.items() if k >= cutoff}
-    data[_today()] = day
-    cache.mkdir(parents=True, exist_ok=True)
-    (cache / FILE).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    charge(ctx, agent, spec)
+
+
+def charge(ctx, agent: str, spec: Any) -> None:
+    """記一次實際送出的請求（不檢查上限）；重送也要記，因為供應商每次都算額度。"""
+    cache = ctx.settings.paths.cache
+    with _LOCK:
+        day = _day(cache)
+        ctx.llm_calls += 1
+        day[TOTAL] = day.get(TOTAL, 0) + 1
+        key = _key(agent, spec)
+        day[key] = day.get(key, 0) + 1
+        data = _load(cache)
+        cutoff = (dt.date.fromisoformat(_today()) - dt.timedelta(days=14)).isoformat()
+        data = {k: v for k, v in data.items() if k >= cutoff}
+        data[_today()] = day
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / FILE).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
