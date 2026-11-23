@@ -40,6 +40,8 @@ def doctor(args: argparse.Namespace) -> int:
         labels = [s.label + (f"（每日 {s.daily_limit} 次，今日已用 {model_count(settings.paths.cache, name, s)}）"
                              if s.daily_limit is not None else "") for s in chain]
         print(f"    {name:<18}" + " → ".join(labels + ["規則版"]) + ready)
+    if settings.llm.api_key_backup_env:
+        keys.add(settings.llm.api_key_backup_env)
     for key in sorted(keys):
         print(f"  金鑰 {key}：{'已找到' if get_secret(key) is not None else '找不到'}")
     if settings.llm.enabled:
@@ -47,6 +49,7 @@ def doctor(args: argparse.Namespace) -> int:
         used = daily_count(settings.paths.cache)
         print(f"  LLM 額度：今日已用 {used}/{settings.llm.daily_call_limit} 次，"
               f"每次執行最多 {settings.llm.max_calls_per_run} 次（以太平洋時間換日，約台北 16:00）")
+        print(f"  RPM 上限：稀缺 {settings.llm.rpm_scarce}／分、Lite {settings.llm.rpm_lite}／分（單金鑰；研究分批與情報／市場並行會自動排隊）")
     print(f"  資料根目錄：{settings.paths.root}")
     print(f"  程式版本：{code_version()}")
     print(f"  現在（台北）：{moment:%Y-%m-%d %H:%M:%S}")

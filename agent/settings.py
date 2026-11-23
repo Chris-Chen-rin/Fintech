@@ -140,8 +140,11 @@ class LLMSettings:
     default: ModelSpec | None = None
     agents: dict[str, ModelSpec] = field(default_factory=dict)
     fallback: dict[str, tuple[ModelSpec, ...]] = field(default_factory=dict)  # 依序嘗試的備援模型
-    max_calls_per_run: int = 30  # 一次完整執行約 8～15 次（研究依產業分批）；超過就降級為規則版
-    daily_call_limit: int = 150  # 所有模型合計的每日上限
+    max_calls_per_run: int = 80  # 含 HTTP 重送與風控退回；超過就降級為規則版
+    daily_call_limit: int = 400  # 所有模型合計的每日上限（雙金鑰時可提高）
+    api_key_backup_env: str = "GEMINI_API_KEY_BACKUP"  # 主金鑰超 quota 時改用
+    rpm_scarce: int = 5  # 稀缺 Flash 每分鐘上限（單金鑰）
+    rpm_lite: int = 15  # Flash-Lite／Gemma 每分鐘上限（單金鑰）
 
     def for_agent(self, name: str) -> ModelSpec | None:
         spec = self.agents.get(name, self.default)
@@ -398,17 +401,21 @@ def _parse_llm(raw: dict[str, Any], errors: list[str], warnings: list[str]) -> L
             items = spec_raw if isinstance(spec_raw, list) else [spec_raw]
             specs = [_model_spec(r, f"llm.fallback.{name}[{i}]", errors) for i, r in enumerate(items)]
             fallback[name] = tuple(s for s in specs if s)
-    limits = {}
-    for name in ("max_calls_per_run", "daily_call_limit"):
+    limits: dict[str, Any] = {}
+    for name in ("max_calls_per_run", "daily_call_limit", "rpm_scarce", "rpm_lite"):
         if name in raw:
             value = raw[name]
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 errors.append(f"llm.{name} 必須是非負整數")
             else:
                 limits[name] = value
+    if "api_key_backup_env" in raw:
+        limits["api_key_backup_env"] = str(raw.get("api_key_backup_env") or "")
     llm = LLMSettings(default, agents, fallback, **limits)
     if not llm.enabled:
         warnings.append("LLM 尚未設定：五個 Agent 都使用規則版")
+    elif llm.api_key_backup_env and get_secret(llm.api_key_backup_env) is None:
+        warnings.append(f"備援金鑰 {llm.api_key_backup_env} 尚未設定（主金鑰超 quota 時無法切換）")
     return llm
 
 

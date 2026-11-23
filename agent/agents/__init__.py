@@ -30,12 +30,16 @@ LLM_AGENTS: dict[str, type] = {
 
 
 def build_agents(settings: Settings) -> dict[str, list]:
+    from ..llm.rate_limit import configure
+
+    configure(settings.llm.rpm_scarce, settings.llm.rpm_lite)
+    backup = settings.llm.api_key_backup_env
     agents: dict[str, list] = {}
     for step in STEPS:
         chain: list = []
         cls = LLM_AGENTS.get(step)
         if cls is not None:
-            chain += [cls(spec) for spec in settings.llm.chain(step)]
+            chain += [cls(spec, backup_env=backup) for spec in settings.llm.chain(step)]
         chain.append(RULE_AGENTS[step]())
         agents[step] = chain
     return agents

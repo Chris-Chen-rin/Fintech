@@ -126,14 +126,15 @@ class Unavailable(LLMError):
 
 def post_json(url: str, headers: dict[str, str], body: dict[str, Any], timeout: float, retries: int = 3,
               on_retry: Callable[[], None] | None = None) -> dict[str, Any]:
-    """POST JSON；429 與 5xx 依序等待 2、4 秒重試，最多送 retries 次。
-    on_retry 在每次重送前呼叫（供應商每次請求都算額度，本機也要跟著記）。"""
+    """POST JSON；429 與 5xx 依序等待 4、8 秒重試，最多送 retries 次。
+    on_retry 在每次重送前呼叫（供應商每次請求都算額度，本機也要跟著記）。
+    用盡後若仍是忙碌／限速，丟 Unavailable（final），改換下一個模型。"""
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
     last = ""
     busy = False
     for attempt in range(retries):
         if attempt:
-            time.sleep(2 ** attempt)
+            time.sleep(2 ** (attempt + 1))  # 第 2、3 次送出前等 4、8 秒
             if on_retry:
                 on_retry()
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json", **headers}, method="POST")

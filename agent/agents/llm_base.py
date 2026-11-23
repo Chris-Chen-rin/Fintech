@@ -19,11 +19,11 @@ class LLMAgent:
     name = ""
     variant = "llm"
 
-    def __init__(self, spec: ModelSpec, client: Any = None):
+    def __init__(self, spec: ModelSpec, client: Any = None, backup_env: str = ""):
         from ..llm.providers import make_client
 
         self.spec = spec
-        self.client = client or make_client(spec)
+        self.client = client or make_client(spec, backup_env=backup_env)
         self.last_model: tuple[str, str] = (spec.dplan_provider, spec.model)
 
     def build_prompt(self, ctx: RunContext, inputs: dict[str, Any], feedback: list[str] | None) -> tuple[str, str]:

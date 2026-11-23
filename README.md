@@ -103,6 +103,27 @@ Copy-Item "$env:USERPROFILE\Downloads\DataPack_*.json" inbox\   # 把後台下�
 - 每次執行的完整紀錄（資料包、各 Agent 輸入輸出、LLM 原始回應、D-Plan、檢查報告）存在 `archive/<交易日>/<執行時間>_<evening|morning>/`。
 - LLM 失敗或額度用完時會自動依序改用備援模型、最後改用規則版，D-Plan 照樣產生；整段 LLM 連不上而拖太久時，改跑 `run --rules-only`。
 
+### LLM 模型（`config/settings.yaml`）
+
+| Agent | 主模型 | 備援（依序） |
+|---|---|---|
+| 情報／研究 | `gemini-3.5-flash-lite` | `3.1-flash-lite` → `3-flash-preview` → `gemma-4-31b-it` |
+| 市場策略 | `gemini-3.5-flash-lite` | `3-flash-preview` → `3.1-flash-lite` → `gemma-4-31b-it` |
+| 反方審查／投資組合經理 | `gemini-3.8-flash`（本機每日上限 8 次，含重送） | `3-flash-preview` → `3.5-flash-lite` → `gemma-4-31b-it` |
+
+- 429／5xx：**同一模型**再送，間隔 **4、8 秒**，最多 3 次，仍失敗才換備援模型。
+- **RPM**：稀缺 Flash ≤ 5／分、Flash-Lite／Gemma ≤ 15／分（單金鑰；研究分批與情報／市場並行會自動排隊交錯）。
+- **備援金鑰**：`.env` 的 `GEMINI_API_KEY_BACKUP`；主金鑰回 quota／resource exhausted 時改打備援金鑰。
+- 本機上限：`max_calls_per_run: 80`、`daily_call_limit: 400`（含重送；雙金鑰時可負擔較多次嘗試）。
+
+**修改紀錄**
+
+| 時間（台北） | 原因 |
+|---|---|
+| 2026-11-23 22:45 | 最常踩到的是 RPM，不是日額。加入稀缺 5／Lite 15 的本機 RPM 排隊；情報與市場並行、研究分批靠限速交錯；支援 `GEMINI_API_KEY_BACKUP`；`max_calls_per_run` 30→80、`daily_call_limit` 150→400。 |
+| 2026-11-23 22:25 | Google 免費額度約為稀缺 Flash 20 次／天／模型、Flash-Lite 500 次／天／模型。稀缺模型改為與其他模型相同可重送最多 3 次；重試間隔由 2、4 秒改為 4、8 秒；本機 `daily_limit` 由 3 調為 8，留餘量給重送與風控退回重跑。 |
+| 2026-11-23 22:00 | Google 對新專案封鎖 `2.5-flash`／`2.5-flash-lite`（404）；`3.6-flash` 常連線逾時；`3.8-flash` 常 503。拿掉失效／不穩模型，市場不再把稀缺 Flash 當備援，改走 `3-flash-preview` → Lite → Gemma；稀缺模型 `timeout` 縮為 120 秒，避免卡住太久才換備援。本機逾時訊息（如 `The read operation timed out`）是 urllib 等超過時限，不是 Google 回傳的內容。 |
+
 ---
 
 ## 3. 系統架構

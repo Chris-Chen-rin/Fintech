@@ -197,15 +197,23 @@ def execute(ctx: RunContext, dp_path: Path, cal: TradingCalendar, write_out: boo
     runner = AgentRunner(ctx)
     source_keys = {r.key for r in ctx.registry.all()}
 
-    intel_facts = runner.run("intel", agents["intel"], {"trade_date": window.trade_date.isoformat()},
-                             lambda n, o: validate_facts(n, o, source_keys))
-    ctx.facts.extend(intel_facts)
+    # 情報與市場互不依賴（市場只用量化市場事實），並行交錯請求，靠 RPM 限速錯開
+    from concurrent.futures import ThreadPoolExecutor
 
     prev_mv = None if datapack.is_first_day else previous_market_view(settings, window.prev_trading_date)
     market_inputs = {"market_facts": ctx.facts.of("market"), "market_metrics": ctx.market_metrics,
                      "cash_ratio": datapack.cash_ratio, "first_day": datapack.is_first_day,
                      "prev_regime": (prev_mv or {}).get("regime")}
-    mv = runner.run("market", agents["market"], market_inputs, lambda n, o: validate_market_view(n, o, ctx.facts.keys()))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_intel = pool.submit(
+            runner.run, "intel", agents["intel"], {"trade_date": window.trade_date.isoformat()},
+            lambda n, o: validate_facts(n, o, source_keys))
+        fut_market = pool.submit(
+            runner.run, "market", agents["market"], market_inputs,
+            lambda n, o: validate_market_view(n, o, ctx.facts.keys()))
+        intel_facts = fut_intel.result()
+        mv = fut_market.result()
+    ctx.facts.extend(intel_facts)
     ctx.log(f"▶ 市場策略：{mv.regime}／{mv.stance}／{mv.intent}，現金區間 {mv.cash_range[0]:.0%}–{mv.cash_range[1]:.0%}")
 
     taiex_fact = next((f.key for f in ctx.facts.of("market") if "TAIEX_ret_20d_pct" in f.values), None)

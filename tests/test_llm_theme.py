@@ -76,13 +76,12 @@ def _http_error(code):
 def test_post_json_busy_is_final_and_counts_retries(monkeypatch):
     import agent.llm.base as B
 
-    sent = []
-    monkeypatch.setattr(B.time, "sleep", lambda s: None)
+    sent, waits, retried = [], [], []
+    monkeypatch.setattr(B.time, "sleep", lambda s: waits.append(s))
     monkeypatch.setattr(B.urllib.request, "urlopen", lambda *a, **k: sent.append(1) or (_ for _ in ()).throw(_http_error(503)))
-    retried = []
     with pytest.raises(B.Unavailable) as info:
         B.post_json("http://x", {}, {}, 1, retries=3, on_retry=lambda: retried.append(1))
-    assert info.value.final and len(sent) == 3 and len(retried) == 2
+    assert info.value.final and len(sent) == 3 and len(retried) == 2 and waits == [4, 8]
     sent.clear()
     monkeypatch.setattr(B.urllib.request, "urlopen", lambda *a, **k: sent.append(1) or (_ for _ in ()).throw(_http_error(400)))
     with pytest.raises(LLMError) as info:
@@ -90,16 +89,60 @@ def test_post_json_busy_is_final_and_counts_retries(monkeypatch):
     assert not isinstance(info.value, B.Unavailable) and len(sent) == 1
 
 
-def test_scarce_model_sends_once(monkeypatch):
+def test_all_models_retry_three_times(monkeypatch):
+    """稀缺與一般模型都最多送 3 次（Google 稀缺約 20／天、Lite 約 500／天，允許同模型重送）。"""
     import agent.llm.providers as P
+    import agent.llm.rate_limit as R
 
+    monkeypatch.setattr(R, "acquire", lambda *a, **k: 0.0)
     seen = {}
     monkeypatch.setattr(P, "post_json", lambda *a, retries, on_retry: seen.setdefault(a[0], retries) and {})
     monkeypatch.setenv("K", "secret")
-    for model, limit in (("scarce", 3), ("lite", None)):
+    for model, limit in (("scarce", 8), ("lite", None)):
         with pytest.raises(LLMError):
             make_client(ModelSpec("google", model, "K", daily_limit=limit)).complete_json("s", "u")
-    assert [seen[u] for u in sorted(seen, key=lambda u: "lite" in u)] == [1, 3]
+    assert set(seen.values()) == {3}
+
+
+def test_rate_limit_tiers_and_rpm(monkeypatch):
+    import agent.llm.rate_limit as R
+    from agent.settings import ModelSpec
+
+    R.reset()
+    R.configure(scarce=2, lite=3)
+    assert R.tier_for(ModelSpec("google", "gemini-3.8-flash", daily_limit=8)) == "scarce"
+    assert R.tier_for(ModelSpec("google", "gemini-3-flash-preview")) == "scarce"
+    assert R.tier_for(ModelSpec("google", "gemini-3.5-flash-lite")) == "lite"
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(R.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(R.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    assert R.acquire("k1", "scarce") == 0.0
+    assert R.acquire("k1", "scarce") == 0.0
+    waited = R.acquire("k1", "scarce")
+    assert waited >= 60.0
+    R.reset()
+
+
+def test_gemini_rotates_on_quota(monkeypatch):
+    import agent.llm.providers as P
+    import agent.llm.rate_limit as R
+    from agent.llm.base import Unavailable
+
+    monkeypatch.setattr(R, "acquire", lambda *a, **k: 0.0)
+    monkeypatch.setattr(P, "get_secret", lambda n: {"K1": "secret1", "K2": "secret2"}.get(n))
+    used = []
+
+    def fake_post(url, headers, body, timeout, retries=3, on_retry=None):
+        used.append(headers.get("x-goog-api-key"))
+        if headers.get("x-goog-api-key") == "secret1":
+            raise Unavailable("HTTP 429：quota exceeded")
+        return {"candidates": [{"content": {"parts": [{"text": "{\"ok\":true}"}]}}],
+                "usageMetadata": {}, "modelVersion": "m"}
+
+    monkeypatch.setattr(P, "post_json", fake_post)
+    client = make_client(ModelSpec("google", "gemini-3.5-flash-lite", "K1"), backup_env="K2")
+    assert client.complete_json("s", "u").data == {"ok": True}
+    assert used == ["secret1", "secret2"]
 
 
 # ---------------------------------------------------------------- agent_metadata
@@ -191,8 +234,8 @@ class _MockLLMMarket(LLMAgent):
     """把規則版包成 LLM 版，只驗證管線（token、模型紀錄、metadata）。"""
     name = "market"
 
-    def __init__(self, spec):
-        super().__init__(spec, MockClient(spec, lambda s, u: {"note": "ok"}))
+    def __init__(self, spec, backup_env: str = ""):
+        super().__init__(spec, MockClient(spec, lambda s, u: {"note": "ok"}), backup_env=backup_env)
 
     def build_prompt(self, ctx, inputs, feedback):
         return "你是市場分析師", json.dumps({"facts": len(inputs["market_facts"])})
@@ -205,8 +248,8 @@ class _MockLLMMarket(LLMAgent):
 class _BrokenLLMPM(LLMAgent):
     name = "portfolio_manager"
 
-    def __init__(self, spec):
-        super().__init__(spec, MockClient(spec, lambda s, u: "這不是 JSON"))
+    def __init__(self, spec, backup_env: str = ""):
+        super().__init__(spec, MockClient(spec, lambda s, u: "這不是 JSON"), backup_env=backup_env)
 
     def build_prompt(self, ctx, inputs, feedback):
         return "你是經理人", "{}"

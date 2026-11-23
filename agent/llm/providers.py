@@ -6,7 +6,8 @@ import time
 from typing import Any, Callable
 
 from ..settings import ModelSpec, get_secret
-from .base import LLMError, LLMResult, parse_json_text, post_json
+from .base import LLMError, LLMResult, Unavailable, parse_json_text, post_json
+from .rate_limit import acquire, tier_for
 
 OPENAI_COMPATIBLE_BASE = {
     "openai": "https://api.openai.com/v1",
@@ -24,20 +25,55 @@ def _key(spec: ModelSpec, required: bool = True) -> str:
     return key or ""
 
 
+def _key_chain(spec: ModelSpec, backup_env: str = "") -> list[tuple[str, str]]:
+    """主金鑰＋備援金鑰（有找到的才列入）。"""
+    envs = [spec.api_key_env]
+    if backup_env and backup_env not in envs:
+        envs.append(backup_env)
+    out = [(e, get_secret(e) or "") for e in envs if e and get_secret(e)]
+    if not out and spec.api_key_env:
+        raise LLMError(f"找不到金鑰 {spec.api_key_env}" + (f"／{backup_env}" if backup_env else ""))
+    return out
+
+
+def _looks_like_quota(text: str) -> bool:
+    t = text.lower()
+    return any(s in t for s in ("quota", "resource_exhausted", "resource exhausted", "billing"))
+
+
 class _Client:
-    """有每日上限的稀缺模型只送一次，失敗就換備援；其他模型遇到 429／5xx 最多送 3 次。"""
+    """遇到 429／5xx 最多送 3 次（間隔 4、8 秒）；送出前依 RPM 排隊。
+    Google 免費額度約：稀缺 Flash 20 次／天／模型、Flash-Lite 500 次／天／模型。"""
     on_retry: Callable[[], None] | None = None
+    backup_env: str = ""
+    _key_i: int = 0
+
+    def _gated_post(self, url: str, headers: dict[str, str], body: dict[str, Any], secret: str) -> dict[str, Any]:
+        tier = tier_for(self.spec)
+
+        def on_retry() -> None:
+            acquire(secret, tier)
+            if self.on_retry:
+                self.on_retry()
+
+        acquire(secret, tier)
+        return post_json(url, headers, body, self.spec.timeout, retries=3, on_retry=on_retry)
 
     def _post(self, url: str, headers: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
-        retries = 1 if self.spec.daily_limit is not None else 3
-        return post_json(url, headers, body, self.spec.timeout, retries=retries, on_retry=self.on_retry)
+        secret = headers.get("x-goog-api-key") or ""
+        if secret.startswith("Bearer "):
+            secret = secret[7:]
+        if not secret and "Authorization" in headers:
+            secret = headers["Authorization"].removeprefix("Bearer ").strip()
+        return self._gated_post(url, headers, body, secret or "anon")
 
 
 class OpenAICompatibleClient(_Client):
     """OpenAI、xAI、DeepSeek、OpenRouter 與任何相容 OpenAI Chat Completions 的服務（自架模型用 base_url）。"""
 
-    def __init__(self, spec: ModelSpec):
+    def __init__(self, spec: ModelSpec, backup_env: str = ""):
         self.spec = spec
+        self.backup_env = backup_env
         self.base = (spec.base_url or OPENAI_COMPATIBLE_BASE.get(spec.provider, "")).rstrip("/")
 
     def complete_json(self, system: str, user: str) -> LLMResult:
@@ -74,8 +110,9 @@ class OpenAICompatibleClient(_Client):
 class AnthropicClient(_Client):
     URL = "https://api.anthropic.com/v1/messages"
 
-    def __init__(self, spec: ModelSpec):
+    def __init__(self, spec: ModelSpec, backup_env: str = ""):
         self.spec = spec
+        self.backup_env = backup_env
 
     def complete_json(self, system: str, user: str) -> LLMResult:
         headers = {"x-api-key": _key(self.spec), "anthropic-version": "2023-06-01"}
@@ -100,8 +137,10 @@ class AnthropicClient(_Client):
 class GeminiClient(_Client):
     URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-    def __init__(self, spec: ModelSpec):
+    def __init__(self, spec: ModelSpec, backup_env: str = ""):
         self.spec = spec
+        self.backup_env = backup_env
+        self._key_i = 0
 
     def complete_json(self, system: str, user: str) -> LLMResult:
         url = (self.spec.base_url or self.URL).format(model=self.spec.model)
@@ -111,8 +150,25 @@ class GeminiClient(_Client):
             "generationConfig": {"temperature": self.spec.temperature, "maxOutputTokens": self.spec.max_output_tokens,
                                  "responseMimeType": "application/json", **self.spec.extra},
         }
+        keys = _key_chain(self.spec, self.backup_env)
         started = time.monotonic()
-        data = self._post(url, {"x-goog-api-key": _key(self.spec)}, body)
+        last: Exception | None = None
+        n = len(keys)
+        start = self._key_i % n
+        for offset in range(n):
+            i = (start + offset) % n
+            _env, key = keys[i]
+            try:
+                data = self._gated_post(url, {"x-goog-api-key": key}, body, key)
+                self._key_i = i
+                break
+            except Unavailable as exc:
+                last = exc
+                if offset + 1 < n and _looks_like_quota(str(exc)):
+                    continue
+                raise
+        else:
+            raise last or LLMError("沒有可用的 Gemini 金鑰")
         try:
             text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"] if not p.get("thought"))
         except (KeyError, IndexError, TypeError) as exc:
@@ -143,11 +199,11 @@ class MockClient:
         return LLMResult(parse_json_text(text), text, len(system + user) // 2, len(text) // 2, self.spec.model, 0.0)
 
 
-def make_client(spec: ModelSpec):
+def make_client(spec: ModelSpec, backup_env: str = ""):
     if spec.provider in ("openai", "xai", "deepseek", "openrouter", "openai_compatible"):
-        return OpenAICompatibleClient(spec)
+        return OpenAICompatibleClient(spec, backup_env)
     if spec.provider == "anthropic":
-        return AnthropicClient(spec)
+        return AnthropicClient(spec, backup_env)
     if spec.provider == "google":
-        return GeminiClient(spec)
+        return GeminiClient(spec, backup_env)
     raise LLMError(f"不支援的供應商 {spec.provider}")

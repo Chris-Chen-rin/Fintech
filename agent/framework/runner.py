@@ -1,6 +1,7 @@
 """執行單一 Agent：驗證契約、重試、降級為規則版、存下輸入輸出。"""
 from __future__ import annotations
 
+import threading
 import time
 import traceback
 from typing import Any, Callable, Protocol
@@ -25,6 +26,7 @@ class AgentRunner:
         self.seq = 0
         self.used: dict[str, str] = {}
         self.models: dict[str, tuple[str, str]] = {}  # 步驟 → (D-Plan 供應商, 模型版本)
+        self._lock = threading.Lock()  # 情報／市場可並行時保護序號與存檔
 
     def run(self, step: str, agents: list[Agent], inputs: dict[str, Any],
             validate: Callable[[str, Any], None], feedback: list[str] | None = None,
@@ -36,7 +38,9 @@ class AgentRunner:
             if agent.variant != "llm":
                 notes = list(feedback or [])
             for attempt in range(1, (attempts if agent.variant == "llm" else 1) + 1):
-                self.seq += 1
+                with self._lock:
+                    self.seq += 1
+                    seq = self.seq
                 started = time.monotonic()
                 output: Any = None
                 record: dict[str, Any] = {"step": step, "agent": agent.name, "variant": agent.variant,
@@ -55,9 +59,10 @@ class AgentRunner:
                     continue
                 finally:
                     record["seconds"] = round(time.monotonic() - started, 3)
-                    self.ctx.save(f"agents/{self.seq:02d}_{step}_{agent.variant}.json", record | {"output": output})
-                self.used[step] = agent.variant
-                if agent.variant == "llm":
-                    self.models[step] = agent.last_model
+                    self.ctx.save(f"agents/{seq:02d}_{step}_{agent.variant}.json", record | {"output": output})
+                with self._lock:
+                    self.used[step] = agent.variant
+                    if agent.variant == "llm":
+                        self.models[step] = agent.last_model
                 return output
         raise AgentFailure(f"{step} 的所有 Agent 版本都失敗：" + "；".join(notes[-3:]))
